@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 from wenyi_cli.cli import app
 from wenyi_core.config import Config
+from wenyi_core.llm.limits import RequestCancelled, RequestStopped
 from wenyi_core.llm.providers.fake import FakeClient
 from wenyi_core.pipeline.orchestrator import Orchestrator
 from wenyi_core.storage.file import FileStorage
@@ -53,6 +54,34 @@ def test_interruption_saves_elapsed_and_preserves_exception(tmp_path, error):
     assert ledger["runs"][0]["status"] == (
         "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
     )
+
+
+@pytest.mark.parametrize("error", [RequestCancelled("pause"), RequestStopped("budget")])
+def test_cooperative_stop_is_recorded_as_paused_not_failed(tmp_path, error):
+    # A paused Web/Desktop run stops through cooperative cancellation; its run history row
+    # must agree with the job record and event log instead of reporting a failure.
+    store = FileStorage(str(tmp_path / "run"))
+    with pytest.raises(type(error)):
+        with RunTimer("translate", clock=lambda: 0.0) as timer:
+            timer.store = store
+            raise error
+    ledger = load_timing(store.run_dir)
+    assert ledger is not None
+    assert ledger["runs"][0]["status"] == "paused"
+
+
+def test_exception_can_declare_its_run_status(tmp_path):
+    class PauseSignal(KeyboardInterrupt):
+        run_status = "paused"
+
+    store = FileStorage(str(tmp_path / "run"))
+    with pytest.raises(PauseSignal):
+        with RunTimer("translate", clock=lambda: 0.0) as timer:
+            timer.store = store
+            raise PauseSignal()
+    ledger = load_timing(store.run_dir)
+    assert ledger is not None
+    assert ledger["runs"][0]["status"] == "paused"
 
 
 def test_timing_write_failure_preserves_previous_ledger_and_original_error(tmp_path, monkeypatch):

@@ -15,6 +15,9 @@ from .configuration import LLMConfig
 class RequestStopped(BaseException):
     """Stop the workflow without converting a budget/cancellation into a model fallback."""
 
+    #: Run history records cooperative stops as paused; the run resumes from its checkpoints.
+    run_status = "paused"
+
 
 class RequestCancelled(RequestStopped):
     """Stop cooperatively at the caller's request, without reporting a failure."""
