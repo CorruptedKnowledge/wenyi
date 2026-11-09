@@ -94,14 +94,16 @@ Reconstruction is separate from book-state or ledger migration. It runs when CLI
 configuration is loaded and when each Web repository or Desktop catalog starts.
 The pure reconstruction functions preserve valid supplied fields, discard invalid
 ones, and validate the resulting effective configuration without aliasing retired
-names. New setting writes use strict validation.
+names. Unsupported default templates and invalid saved strategies reset to current
+defaults instead of being interpreted on read. New setting writes use strict validation.
 
 CLI takes a per-file upgrade lock, rechecks the current bytes, publishes an exact
 content-addressed backup, then atomically replaces the YAML. Web and Desktop
 insert the original document and discarded paths into `configuration_backups`
 in the same transaction as the replacement. A null `project_id` identifies global
 settings, including their revision and default-template metadata; a project ID
-identifies that project's configuration. Unchanged documents produce no writes.
+identifies a backup containing that project's `config` and `strategy`.
+Unchanged documents produce no writes.
 Backup or replacement failure preserves the original document; each project's
 transaction is independent, so a later failure does not undo earlier upgrades.
 
@@ -109,7 +111,7 @@ Web uses the settings advisory lock and project row locks. Desktop uses short
 catalog write transactions, with no credential access, model requests or filesystem
 work inside them. Neither path modifies project state, usage or frozen jobs.
 Backup locations and user-visible fallback behavior are documented in the
-[configuration reference](../reference/configuration.md#retired-settings).
+[configuration reference](../reference/configuration.md#saved-settings-reconstruction).
 
 ## Execution and publication
 
@@ -129,6 +131,27 @@ Initialization commits the manifest last; publication uses a recoverable index b
 changing formal targets. Stable segment identities, consistent export snapshots, and
 once-only usage accounting apply across storage backends. Detailed checkpoint, language
 policy and prompt-resource rules live in [pipeline development](pipeline.md).
+
+### EPUB CPU workers
+
+EPUB readers and template exporters use `resource_pool.py` for physical-XHTML work:
+at least 12 resources and 2 MiB of uncompressed XHTML enable up to six spawned workers,
+capped by available CPU count and affinity. Smaller inputs, daemon processes and
+non-importable interactive entry points run the same functions serially. These internal
+thresholds are independent of LLM concurrency and apply to CLI, Web and Desktop.
+
+One admission slot per parent process prevents concurrent EPUB operations from multiplying
+their pools; separate application/worker processes retain independent budgets. Each pool
+admits at most two pending resources per worker, yields in source order and drains/cancels
+its work before releasing admission. Workers receive explicit data, never Storage,
+database connections, credentials or platform context.
+
+Parsing annotates resources, then resolves note contexts by target XHTML before constructing
+logical chapters. Bilingual export prepares all source-link destinations before rendering,
+sending each resource only its outgoing link mapping. EPUB presentation rewrites run in the
+resource task; ZIP reading/writing, package coordination and atomic publication stay in the
+parent. Frozen CLI/Desktop entry points dispatch multiprocessing workers before importing
+their applications.
 
 ## Boundary verification
 
