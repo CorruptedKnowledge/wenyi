@@ -164,8 +164,8 @@ def test_preparation_does_not_seed_glossary(tmp_path, entry_point, book_understa
     resumed_client = FakeClient(handler=handler)
     getattr(Orchestrator(config, client=resumed_client, storage=store), entry_point)(str(source))
     assert store.all_terms() == original_terms
-    expected = ["synopsis.book"] if book_understanding and entry_point != "prepare" else []
-    assert [call["operation"] for call in resumed_client.calls] == expected
+    # Glossary edits do not invalidate the paid synopsis; translation applies the glossary.
+    assert resumed_client.calls == []
 
 
 def test_synopsis_interrupt_resumes_without_repeating_prescan_or_style(tmp_path):
@@ -190,7 +190,7 @@ def test_synopsis_interrupt_resumes_without_repeating_prescan_or_style(tmp_path)
     assert [call["operation"] for call in client.calls] == ["synopsis.book"]
     resumed_analysis = store.load_analysis() or {}
     metadata = resumed_analysis.pop("book_synopsis_meta")
-    assert metadata["version"] == 2
+    assert metadata["version"] == 3
     assert len(metadata["inputs_sha256"]) == 64
     assert resumed_analysis == {
         **(analysis or {}),

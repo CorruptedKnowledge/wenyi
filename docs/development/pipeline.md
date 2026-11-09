@@ -139,7 +139,7 @@ fails; never reinterpret a diagnostic as successful work.
 | Cached work | Inputs that matter |
 | --- | --- |
 | Parsed source | Source content and parsing configuration |
-| Chapter digest/synopsis | Consumed source or digests, task policy, and the effective `synopsis.chapter` / `synopsis.book` inference identity including fallbacks; synopsis also binds its actual guidance inputs. Entries under the earlier whole-configuration identity are adopted and re-keyed while that identity still resolves the same route |
+| Chapter digest/synopsis | Consumed source or digests, task policy, and the effective `synopsis.chapter` / `synopsis.book` inference identity including fallbacks; the synopsis also binds the style analysis but not the glossary, which translation keeps growing (generation still receives the current terms). Entries under the earlier whole-configuration identity are adopted and re-keyed while that identity still resolves the same route |
 | Style analysis | Consumed source samples and digests, task policy, and model configuration |
 | Translation precision | Source and stable segment plan, context, glossary, translation policy and effective inference identity |
 | Annotation/style placement | Complete logical target digest and source item identities |

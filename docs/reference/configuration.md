@@ -418,7 +418,8 @@ whole-book synopsis does not block translation. Failed digests can be completed
 on a later prepare/translate run. Saved digests and the synopsis are reused until
 the source, their prompts, or the model, options, provider or fallbacks of the
 `synopsis.chapter` / `synopsis.book` route change; routing other operations or
-adding model profiles does not repeat the prescan. Preparation never extracts or pre-fills glossary
+adding model profiles does not repeat the prescan. Editing style analysis regenerates
+the synopsis; glossary changes, including terms added during translation, do not. Preparation never extracts or pre-fills glossary
 entries, with or without `terminology_context`.
 
 Terminology evidence adds person discovery and source-grounded notes during
