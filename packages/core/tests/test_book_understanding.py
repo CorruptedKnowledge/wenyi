@@ -9,6 +9,7 @@ import pytest
 from wenyi_core.agents.analyzer import Analyzer
 from wenyi_core.agents.synopsis import Synopsizer
 from wenyi_core.config import Config
+from wenyi_core.i18n.policy.models import PolicyPlan, content_hash
 from wenyi_core.llm.limits import RequestCancelled, RequestStopped
 from wenyi_core.llm.providers.fake import FakeClient
 from wenyi_core.models.document import Chapter, Document, Segment
@@ -429,3 +430,236 @@ def test_analysis_uses_digest_context_and_resumes_paid_result(tmp_path, enabled)
     agent._ask_json = Mock(return_value={})
     agent.analyze("Source prose.", chapter_digests=["Full digest."])
     assert "Full digest." in agent._ask_json.call_args.args[1]
+
+
+# Cache identity follows the synopsis routes, not the whole LLM configuration.
+
+_FLASH = "deepseek-v4.1-flash"
+
+
+def _routed_config(*, fast=None, provider=None, providers=None, models=None, routes=None):
+    """Mirror a Desktop OpenCode Go configuration with one profile per tier."""
+    profiles = {
+        name: {"provider": "default", "model": _FLASH} for name in ("strong", "cheap", "fast")
+    }
+    profiles["fast"].update(fast or {})
+    profiles.update(models or {})
+    return Config.from_dict(
+        {
+            "llm": {
+                "providers": {
+                    "default": {"kind": "opencode-go", **(provider or {})},
+                    **(providers or {}),
+                },
+                "models": profiles,
+                "tiers": {"strong": "strong", "cheap": "cheap", "fast": "fast"},
+                "routes": routes or {},
+            }
+        }
+    )
+
+
+_GLOSSARY_ROUTES = {
+    "models": {"flash_no_reasoning": {"provider": "default", "model": _FLASH}},
+    "routes": {
+        "glossary.extract": {"model": "flash_no_reasoning"},
+        "glossary.align_history": {"model": "flash_no_reasoning"},
+    },
+}
+
+
+def _digest_store(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("Temporary source text.", encoding="utf-8")
+    store = FileStorage(str(tmp_path / "state"))
+    store.init_from_document(
+        Document(
+            source_lang="en",
+            target_lang="zh",
+            fmt="text",
+            source_path=str(source),
+            chapters=[
+                Chapter(index=0, segments=[Segment(index=0, source="Opening.")]),
+                Chapter(index=1, segments=[Segment(index=0, source="Ending.")]),
+            ],
+        )
+    )
+    store.save_analysis({"style_guide": "Restrained."})
+    return store
+
+
+def _understand(store, config):
+    """Run book understanding through the real Synopsizer; return the requested operations."""
+    client = FakeClient(handler=lambda messages, tier, json_mode: "Digest.", config=config.llm)
+    analyzer = Mock()
+    analyzer.style_brief.return_value = "Restrained."
+    service = BookUnderstandingService(
+        config, Synopsizer(client, config), analyzer, Mock(spec=UsageCoordinator)
+    )
+    assert service.ensure_understanding(store)
+    return [request["operation"] for request in client.calls]
+
+
+_FRESH = ["synopsis.book", "synopsis.chapter", "synopsis.chapter"]
+
+
+def test_unrelated_routes_and_models_keep_book_understanding_cache(tmp_path):
+    store = _digest_store(tmp_path)
+    assert sorted(_understand(store, _routed_config())) == _FRESH
+    assert _understand(store, _routed_config(**_GLOSSARY_ROUTES)) == []
+    other = {"strong": {"provider": "default", "model": "glm-5", "options": {"thinking": True}}}
+    assert _understand(store, _routed_config(models=other)) == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"fast": {"model": "glm-5"}},
+        {"fast": {"options": {"thinking": True}}},
+        {"provider": {"base_url": "https://gateway.example/v1"}},
+        {
+            "models": {"digest": {"provider": "default", "model": "kimi-k3"}},
+            "routes": {"synopsis.chapter": {"model": "digest"}},
+        },
+    ],
+    ids=["model", "options", "provider", "route"],
+)
+def test_digest_route_change_regenerates_digests(tmp_path, change):
+    store = _digest_store(tmp_path)
+    _understand(store, _routed_config())
+    assert _understand(store, _routed_config(**change)).count("synopsis.chapter") == 2
+
+
+def test_book_synopsis_route_change_regenerates_only_the_synopsis(tmp_path):
+    store = _digest_store(tmp_path)
+    _understand(store, _routed_config())
+    change = {
+        "models": {"synopsis": {"provider": "default", "model": "glm-5"}},
+        "routes": {"synopsis.book": {"model": "synopsis"}},
+    }
+    assert _understand(store, _routed_config(**change)) == ["synopsis.book"]
+
+
+def test_digest_route_fallback_change_regenerates_digests(tmp_path):
+    store = _digest_store(tmp_path)
+    _understand(store, _routed_config())
+    change = {
+        "models": {"backup": {"provider": "default", "model": "glm-5"}},
+        "routes": {"synopsis.chapter": {"tier": "fast", "fallbacks": ["backup"]}},
+    }
+    assert _understand(store, _routed_config(**change)).count("synopsis.chapter") == 2
+
+
+@pytest.mark.parametrize("prefix", ["chapter_digest", "book_synopsis"])
+def test_language_policy_change_still_invalidates(tmp_path, monkeypatch, prefix):
+    store = _digest_store(tmp_path)
+    _understand(store, _routed_config())
+    original = PolicyPlan.task_fingerprint
+
+    def revised(plan, name):
+        return original(plan, name) + ("-revised" if name == prefix else "")
+
+    monkeypatch.setattr(PolicyPlan, "task_fingerprint", revised)
+    # Regenerated digests are identical here, so the synopsis inputs do not change.
+    expected = ["synopsis.chapter"] * 2 if prefix == "chapter_digest" else ["synopsis.book"]
+    assert sorted(_understand(store, _routed_config())) == expected
+
+
+def _legacy_state(store, config, *, chapter_meta=True, synopsis=True):
+    """Write digests and a synopsis exactly as releases up to v1.5.1 keyed them."""
+    llm = config.llm.model_dump(mode="json")
+    policy = config.language_policy("analysis")
+    fingerprint = content_hash([policy.task_fingerprint("chapter_digest"), llm])
+    digests = []
+    for index in (0, 1):
+        chapter = store.load_chapter(index)
+        source = "\n".join(segment.source for segment in chapter.text_segments)
+        source_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        key = content_hash([2, source_hash, fingerprint, llm])
+        digest = f"Legacy digest {index}."
+        store.write_artifact(f"preparation/digests/{key}.json", {"digest": digest})
+        if chapter_meta:
+            chapter.meta.update(
+                source_digest=digest,
+                source_digest_complete=True,
+                source_digest_policy=fingerprint,
+                source_digest_version=2,
+                source_digest_sha256=source_hash,
+            )
+            store.save_chapter(chapter)
+        digests.append(digest)
+    if synopsis:
+        inputs = {
+            "language_policy": policy.task_fingerprint("book_synopsis"),
+            "chapters": [[0, digests[0]], [1, digests[1]]],
+            "style": "Restrained.",
+            "source_lang": config.source_lang,
+            "target_lang": config.target_lang,
+            "glossary": [],
+            "routing": llm,
+        }
+        inputs_sha256 = hashlib.sha256(
+            json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        analysis = store.load_analysis() or {}
+        analysis["book_synopsis"] = "Legacy synopsis."
+        analysis["book_synopsis_meta"] = {"version": 2, "inputs_sha256": inputs_sha256}
+        store.save_analysis(analysis)
+    return digests
+
+
+def test_legacy_cache_migrates_when_the_configuration_is_unchanged(tmp_path):
+    store = _digest_store(tmp_path)
+    digests = _legacy_state(store, _routed_config())
+    assert _understand(store, _routed_config()) == []
+    assert [store.load_chapter(i).meta["source_digest"] for i in (0, 1)] == digests
+    # Entries are re-marked under the route identity, so later unrelated edits keep them.
+    assert _understand(store, _routed_config(**_GLOSSARY_ROUTES)) == []
+    assert store.load_analysis()["book_synopsis"] == "Legacy synopsis."
+
+
+def test_legacy_artifacts_migrate_after_chapters_are_restaged(tmp_path):
+    store = _digest_store(tmp_path)
+    digests = _legacy_state(store, _routed_config(), chapter_meta=False, synopsis=False)
+    assert _understand(store, _routed_config()) == ["synopsis.book"]
+    assert [store.load_chapter(i).meta["source_digest"] for i in (0, 1)] == digests
+    for index in (0, 1):
+        chapter = store.load_chapter(index)
+        chapter.meta.clear()
+        store.save_chapter(chapter)
+    assert _understand(store, _routed_config(**_GLOSSARY_ROUTES)) == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        _GLOSSARY_ROUTES,
+        {
+            "models": {
+                "flash_no_reasoning": {"provider": "glossary", "model": _FLASH},
+                "spare": {"provider": "default", "model": "glm-5"},
+            },
+            "providers": {"glossary": {"kind": "deepseek"}},
+            "routes": {"glossary.extract": {"model": "flash_no_reasoning"}},
+        },
+    ],
+    ids=["routes", "routes-new-provider"],
+)
+def test_legacy_cache_migrates_when_unrelated_routes_are_added_at_upgrade(tmp_path, change):
+    store = _digest_store(tmp_path)
+    digests = _legacy_state(store, _routed_config())
+    assert _understand(store, _routed_config(**change)) == []
+    assert [store.load_chapter(i).meta["source_digest"] for i in (0, 1)] == digests
+    assert store.load_analysis()["book_synopsis"] == "Legacy synopsis."
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"fast": {"model": "glm-5"}}, {"provider": {"timeout": 30}}],
+    ids=["digest-model", "shared-provider"],
+)
+def test_legacy_cache_is_not_reused_after_a_relevant_configuration_change(tmp_path, change):
+    """Legacy hashes cannot tell which field changed, so any edit they cannot exclude rebuilds."""
+    store = _digest_store(tmp_path)
+    _legacy_state(store, _routed_config())
+    assert sorted(_understand(store, _routed_config(**change))) == _FRESH

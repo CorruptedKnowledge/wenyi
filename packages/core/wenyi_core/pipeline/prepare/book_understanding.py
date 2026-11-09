@@ -6,18 +6,80 @@ import hashlib
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 from ...agents.analyzer import Analyzer
 from ...agents.synopsis import Synopsizer
 from ...config import Config
 from ...events import ProgressFn
 from ...i18n.policy.models import content_hash
+from ...llm.configuration import LLMConfig
+from ...llm.operations import OPERATIONS
+from ...llm.routing import inference_snapshot
 from ...models.document import Chapter
 from ...storage.protocol import Storage
 from ..run.runtime_usage import UsageCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 _DIGEST_VERSION = 2
+
+
+def _hash_inputs(inputs: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _legacy_llm_documents(llm: LLMConfig, operation: str) -> list[dict[str, Any]]:
+    """Return whole-configuration documents that releases up to v1.5.1 may have hashed.
+
+    Besides the current configuration, offer it without the routes, model profiles and
+    providers that ``operation`` cannot use, so adding unrelated routes in the same step as
+    upgrading still adopts paid caches. A reduced candidate is offered only when it resolves
+    ``operation`` (primary and fallbacks) exactly as the current configuration does; a stored
+    hash equal to the candidate's then proves the cache came from the same route.
+    """
+    current = llm.model_dump(mode="json")
+    chain = set()
+    name: str | None = operation
+    while name is not None:
+        chain.add(name)
+        name = OPERATIONS[name].inherits
+    routes = {key: route for key, route in current["routes"].items() if key in chain}
+    without_routes = {**current, "routes": routes}
+    profiles = set(current["tiers"].values())
+    for route in routes.values():
+        profiles.update(route["fallbacks"])
+        if route["model"] is not None:
+            profiles.add(route["model"])
+    models = {key: model for key, model in current["models"].items() if key in profiles}
+    providers = {model["provider"] for model in models.values()}
+    minimal = {
+        **without_routes,
+        "models": models,
+        "providers": {
+            key: value for key, value in current["providers"].items() if key in providers
+        },
+    }
+    expected = inference_snapshot(llm, (operation,))
+    documents = [current]
+    for document in (without_routes, minimal):
+        if document in documents:
+            continue
+        try:
+            reduced = LLMConfig.model_validate(document)
+            if inference_snapshot(reduced, (operation,)) != expected:
+                continue
+        except (KeyError, ValueError):
+            continue
+        documents.append(document)
+    return documents
+
+
+def _saved_digest(saved: object) -> str:
+    if isinstance(saved, dict) and isinstance(saved.get("digest"), str):
+        return saved["digest"]
+    return ""
 
 
 def _digest_complete(chapter: Chapter) -> bool:
@@ -80,19 +142,28 @@ class BookUnderstandingService:
             "glossary": [
                 [term.source, term.target, term.type, term.gender, term.note] for term in terms
             ],
-            "routing": self._config.llm.model_dump(mode="json"),
         }
-        fingerprint = hashlib.sha256(
-            json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        metadata = {"version": 2, "inputs_sha256": fingerprint}
+        # Bind the synopsis to the route that writes it; unrelated model edits keep it valid.
+        metadata = {
+            "version": 2,
+            "inputs_sha256": _hash_inputs(
+                {**inputs, "inference": inference_snapshot(self._config.llm, ("synopsis.book",))}
+            ),
+        }
         synopsis = analysis.get("book_synopsis", "")
-        if (
-            isinstance(synopsis, str)
-            and synopsis.strip()
-            and analysis.get("book_synopsis_meta") == metadata
-        ):
-            return synopsis
+        if isinstance(synopsis, str) and synopsis.strip():
+            saved = analysis.get("book_synopsis_meta")
+            if saved == metadata:
+                return synopsis
+            # Releases up to v1.5.1 hashed the whole LLM configuration; adopt and re-key a
+            # synopsis whose legacy identity still matches the synopsis.book route.
+            if any(
+                saved == {"version": 2, "inputs_sha256": _hash_inputs({**inputs, "routing": llm})}
+                for llm in _legacy_llm_documents(self._config.llm, "synopsis.book")
+            ):
+                analysis["book_synopsis_meta"] = metadata
+                store.save_analysis(analysis)
+                return synopsis
         if progress:
             progress(0, 0, "Generating whole-book synopsis…")
         synopsis = self._synopsizer.book_synopsis(digests, style, glossary=terms)
@@ -135,55 +206,69 @@ class BookUnderstandingService:
             for ci, ch in loaded.items()
             if ch.text_segments
         }
+        policy = self._config.language_policy("analysis").task_fingerprint("chapter_digest")
+        # Bind digests to the prompts and the synopsis.chapter route (including fallbacks), so
+        # edits to other operations or unused models keep the paid prescan.
         fingerprint = content_hash(
-            [
-                self._config.language_policy("analysis").task_fingerprint("chapter_digest"),
-                self._config.llm.model_dump(mode="json"),
-            ]
+            {
+                "policy": policy,
+                "inference": inference_snapshot(self._config.llm, ("synopsis.chapter",)),
+            }
         )
+        # Releases up to v1.5.1 hashed the whole LLM configuration. Entries under an identity
+        # that still resolves synopsis.chapter identically are adopted instead of paying for a
+        # one-time rebuild after upgrade.
+        legacy = [
+            (content_hash([policy, llm]), llm)
+            for llm in _legacy_llm_documents(self._config.llm, "synopsis.chapter")
+        ]
         source_hashes = {
             ci: hashlib.sha256(source.encode("utf-8")).hexdigest() for ci, source in sources.items()
         }
-        cache_keys = {}
-        for ci in sources:
-            cache_keys[ci] = (
-                "preparation/digests/"
-                + content_hash(
-                    [
-                        _DIGEST_VERSION,
-                        source_hashes[ci],
-                        fingerprint,
-                        self._config.llm.model_dump(mode="json"),
-                    ]
-                )
-                + ".json"
+
+        def current(ci: int, identity: str) -> bool:
+            chapter = loaded[ci]
+            return (
+                _digest_complete(chapter)
+                and chapter.meta.get("source_digest_policy") == identity
+                and chapter.meta.get("source_digest_sha256") == source_hashes[ci]
             )
-            saved = store.read_artifact(cache_keys[ci])
-            if (
-                (
-                    not _digest_complete(loaded[ci])
-                    or loaded[ci].meta.get("source_digest_policy") != fingerprint
-                    or loaded[ci].meta.get("source_digest_sha256") != source_hashes[ci]
-                )
-                and isinstance(saved, dict)
-                and isinstance(saved.get("digest"), str)
-                and saved["digest"]
-            ):
-                loaded[ci].meta.update(
-                    source_digest=saved["digest"],
-                    source_digest_complete=True,
-                    source_digest_policy=fingerprint,
-                    source_digest_version=_DIGEST_VERSION,
-                    source_digest_sha256=source_hashes[ci],
-                )
-                store.save_chapter(loaded[ci])
-        todo = [
-            (ci, source)
-            for ci, source in sources.items()
-            if not _digest_complete(loaded[ci])
-            or loaded[ci].meta.get("source_digest_policy") != fingerprint
-            or loaded[ci].meta.get("source_digest_sha256") != source_hashes[ci]
-        ]
+
+        cache_keys = {
+            ci: "preparation/digests/"
+            + content_hash([_DIGEST_VERSION, source_hashes[ci], fingerprint])
+            + ".json"
+            for ci in sources
+        }
+        for ci in sources:
+            if current(ci, fingerprint):
+                continue
+            digest = _saved_digest(store.read_artifact(cache_keys[ci]))
+            if not digest:
+                if any(current(ci, legacy_fingerprint) for legacy_fingerprint, _ in legacy):
+                    digest = loaded[ci].meta["source_digest"]
+                for legacy_fingerprint, llm in legacy:
+                    if digest:
+                        break
+                    legacy_key = content_hash(
+                        [_DIGEST_VERSION, source_hashes[ci], legacy_fingerprint, llm]
+                    )
+                    digest = _saved_digest(
+                        store.read_artifact(f"preparation/digests/{legacy_key}.json")
+                    )
+                if not digest:
+                    continue
+                # Re-key before marking the chapter; an interrupted migration simply repeats.
+                store.write_artifact(cache_keys[ci], {"digest": digest})
+            loaded[ci].meta.update(
+                source_digest=digest,
+                source_digest_complete=True,
+                source_digest_policy=fingerprint,
+                source_digest_version=_DIGEST_VERSION,
+                source_digest_sha256=source_hashes[ci],
+            )
+            store.save_chapter(loaded[ci])
+        todo = [(ci, source) for ci, source in sources.items() if not current(ci, fingerprint)]
         failed: list[int] = []
         error: Exception | None = None
         if todo:

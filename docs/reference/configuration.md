@@ -415,7 +415,10 @@ reference. It is reconstructed from saved translations.
 `book_understanding` increases initial prescan work, especially for long chapters.
 Chapters containing source text need usable digests before translation; a failed
 whole-book synopsis does not block translation. Failed digests can be completed
-on a later prepare/translate run. Preparation never extracts or pre-fills glossary
+on a later prepare/translate run. Saved digests and the synopsis are reused until
+the source, their prompts, or the model, options, provider or fallbacks of the
+`synopsis.chapter` / `synopsis.book` route change; routing other operations or
+adding model profiles does not repeat the prescan. Preparation never extracts or pre-fills glossary
 entries, with or without `terminology_context`.
 
 Terminology evidence adds person discovery and source-grounded notes during

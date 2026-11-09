@@ -392,6 +392,9 @@ CLI 只覆盖其参数明确支持的设置；Web/Desktop 项目限制见[作用
 `book_understanding` 增加首次预扫工作，长章节尤甚。
 有原文的章节需要可用梗概才能翻译；全书概览失败不阻止翻译。
 失败梗概可在下次 prepare/translate 中补齐。
+已保存的梗概和全书概览会持续复用，直到原文、对应提示词，
+或 `synopsis.chapter`／`synopsis.book` 路由的模型、选项、provider 或 fallback 改变；
+为其他操作配置路由或新增模型档案不会重做预扫。
 无论是否开启 `terminology_context`，准备阶段都不抽取或预填术语。
 
 术语证据在 CLI 待译工作中增加人物发现和原文备注，
