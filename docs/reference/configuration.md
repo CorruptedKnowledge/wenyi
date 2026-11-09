@@ -209,7 +209,8 @@ Only `models ping` sends live probes; see the [CLI reference](../guide/cli.md#mo
 | Model option | Applicable kinds | Default / constraints |
 |---|---|---|
 | `thinking` | DeepSeek, OpenAI, OpenRouter | `true` |
-| `thinking` | OpenCode Go and compatible kinds | `false` |
+| `thinking` | OpenCode Go | Unset: the gateway decides (it reasons for DeepSeek). `false` disables DeepSeek reasoning. |
+| `thinking` | Compatible kinds | `false` |
 | `reasoning_effort` | All preceding kinds | `high`; accepted remote values depend on the endpoint/model. |
 | `extra_body` | DeepSeek, OpenAI, OpenRouter, OpenCode Go, Gemini | `{}`; endpoint-specific request extensions. |
 | `thinking_level` | Gemini | Unset; mutually exclusive with `thinking_budget`. |
@@ -222,7 +223,25 @@ Only `models ping` sends live probes; see the [CLI reference](../guide/cli.md#mo
 They additionally accept **connection-level**
 `llm.providers.<id>.reasoning_style`: `none` (default), `deepseek`, `openai`,
 or `openrouter`. `fake` accepts no model options.
-OpenCode Go sends Wenyi identification/session headers automatically.
+OpenCode Go sends Wenyi identification/session headers automatically. For other
+gateway models, `thinking: false` keeps the gateway default because some models only
+run with thinking. To skip reasoning only where it adds little, route those
+operations to a second profile of the same model, for example the glossary steps:
+
+```yaml
+llm:
+  models:
+    glossary_fast:
+      provider: default
+      model: deepseek-v4.1-flash
+      options: {thinking: false}
+  routes:
+    glossary.extract: {model: glossary_fast}
+    glossary.align_history: {model: glossary_fast}
+```
+
+This is much faster, but without reasoning extraction finds fewer new terms
+and admits more sentence-like entries.
 
 DeepSeek supports effort values `low`, `high`, and `max`; `thinking: false`
 disables thinking and omits effort. When no explicit output cap is configured,
