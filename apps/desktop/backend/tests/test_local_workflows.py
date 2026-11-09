@@ -665,6 +665,13 @@ def test_parallel_translation_isolates_pause_failure_resume_and_usage(
                     fake.usage.summary()["totals"]["total_tokens"] for fake in clients[pid]
                 )
                 assert store.load_usage()["totals"]["total_tokens"] == expected > 0
+                statuses = sorted(run["status"] for run in store.load_timing()["runs"])
+                if pid == first:
+                    # Run history must label the stopped run like its job record does.
+                    stopped = "paused" if outcome == "paused" else "failed"
+                    assert statuses == sorted(["completed", stopped])
+                else:
+                    assert statuses == ["completed"]
             finally:
                 store.close()
 
