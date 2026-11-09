@@ -554,4 +554,28 @@ test("cache writes, ordinary input, unknown coverage and reported TTL stay separ
   await expect(row).not.toContainText("Cache writes (5m)");
   await expect(accounting).not.toContainText("Unknown classification:");
 });
+
+test("a paused run is labelled Paused in run history", async ({ page }) => {
+  await fakeApi(page, {
+    [`/projects/${pid}/stats`]: {
+      usage: { schema_version: 3, totals: {} },
+      timing: {
+        total_seconds: 300,
+        runs: [
+          {
+            id: "run-paused",
+            operation: "workflow",
+            status: "paused",
+            started_at: "2026-09-12T10:00:00Z",
+            elapsed_seconds: 300,
+          },
+        ],
+      },
+    },
+  });
+  await page.goto(`/projects/${pid}`);
+  const history = page.getByRole("list", { name: "Run history", exact: true });
+  await expect(history.getByText("Paused", { exact: true })).toBeVisible();
+  await expect(history.getByText("Failed", { exact: true })).toHaveCount(0);
+});
 }

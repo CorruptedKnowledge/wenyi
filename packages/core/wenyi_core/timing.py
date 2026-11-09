@@ -70,6 +70,21 @@ def save_timing(run_dir: str, record: dict[str, Any]) -> dict[str, Any]:
     return ledger
 
 
+def exit_status(exc_type: type[BaseException] | None) -> str:
+    """Classify how an invocation ended for its run-history row.
+
+    Stop signals declare their own outcome through a ``run_status`` class attribute, so a
+    cooperative pause is recorded as paused without the ledger importing every caller's
+    exception types.
+    """
+    if exc_type is None:
+        return "completed"
+    declared = getattr(exc_type, "run_status", None)
+    if isinstance(declared, str) and declared:
+        return declared
+    return "interrupted" if issubclass(exc_type, (KeyboardInterrupt, SystemExit)) else "failed"
+
+
 class TimingStore(Protocol):
     def record_timing(self, record: dict[str, Any]) -> dict[str, Any]:
         """Serialize and persist one invocation's timing."""
@@ -120,12 +135,7 @@ class RunTimer:
         traceback: TracebackType | None,
     ) -> None:
         self._stopped = self._clock()
-        status = "completed"
-        if exc_type is not None:
-            status = (
-                "interrupted" if issubclass(exc_type, (KeyboardInterrupt, SystemExit)) else "failed"
-            )
-        self._status = status
+        self._status = exit_status(exc_type)
         self._finished_at = datetime.now().astimezone().isoformat(timespec="seconds")
         if self.store is not None:
             try:
