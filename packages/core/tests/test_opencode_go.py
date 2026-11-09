@@ -96,6 +96,32 @@ class TestOpenCodeGoThinking(unittest.TestCase):
         kwargs = self.kwargs("deepseek-v4.1-flash", thinking=True, reasoning_effort="low")
         self.assertEqual(kwargs["extra_body"], {"reasoning_effort": "low"})
 
+    def test_request_meaning_change_bumps_the_inference_identity(self):
+        from wenyi_core.config import Config
+        from wenyi_core.llm.routing import resolve_routes
+
+        cfg = Config.from_dict(
+            {
+                "llm": {
+                    "providers": {"go": {"kind": "opencode-go"}},
+                    "models": {
+                        "m": {
+                            "provider": "go",
+                            "model": "deepseek-v4.1-flash",
+                            "options": {"thinking": False},
+                        }
+                    },
+                    "tiers": {"strong": "m", "cheap": "m", "fast": "m"},
+                }
+            }
+        )
+        current = resolve_routes(cfg.llm)["glossary.extract"].model_identity
+        with patch.object(OpenCodeGoClient, "protocol_version", 1):
+            before = resolve_routes(cfg.llm)["glossary.extract"].model_identity
+        # Version 1 sent nothing for thinking=False; reuse across the change would be wrong.
+        self.assertEqual(OpenCodeGoClient.protocol_version, 2)
+        self.assertNotEqual(current, before)
+
     def test_extra_body_overrides_win(self):
         for extra in ({"thinking": {"type": "enabled"}}, {"reasoning_effort": "low"}):
             with self.subTest(extra=extra):

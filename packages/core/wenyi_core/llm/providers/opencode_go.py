@@ -71,6 +71,9 @@ def build_request_kwargs(
 class OpenCodeGoClient(OpenAICompatibleBaseClient[OpenCodeGoOptions]):
     """OpenCode Go transport with Wenyi User-Agent and a stable session id."""
 
+    # 2: an explicit thinking=False now disables DeepSeek reasoning instead of sending nothing,
+    # so results produced under the old meaning must not be reused as current.
+    protocol_version = 2
     default_base_url = DEFAULT_BASE_URL
     default_api_key_env = DEFAULT_API_KEY_ENV
     requires_api_key = True
