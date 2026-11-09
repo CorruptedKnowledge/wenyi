@@ -19,6 +19,11 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # The path filter lists a pull request's files through the API, which a
+    # private repository only allows with pull-requests read access.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       python: ${{ steps.filter.outputs.python }}
       web: ${{ steps.filter.outputs.web }}

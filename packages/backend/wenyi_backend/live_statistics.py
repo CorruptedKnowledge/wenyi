@@ -85,6 +85,7 @@ class LiveStatistics:
                     "completed",
                     "failed",
                     "interrupted",
+                    "paused",
                 }:
                     runs[row["id"]] = row
             snapshot = {

@@ -31,6 +31,9 @@ def error_code(error: BaseException) -> str:
 class PauseRequested(KeyboardInterrupt):
     """Stop at a persisted boundary, using the core's interruption recovery path."""
 
+    #: A user pause is not an interruption of unknown cause in run history.
+    run_status = "paused"
+
 
 def record_terminal_status(
     request: ExecutionRequest,
