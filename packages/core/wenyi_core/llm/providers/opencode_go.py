@@ -29,9 +29,15 @@ class OpenCodeGoOptions(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
-    thinking: bool = False
+    # None leaves reasoning to the gateway; False disables it where the model allows.
+    thinking: bool | None = None
     reasoning_effort: str = "high"
     extra_body: dict[str, Any] = Field(default_factory=dict)
+
+
+def _is_deepseek(model: str) -> bool:
+    """Match DeepSeek models, including vendor-prefixed gateway names."""
+    return model.rsplit("/", 1)[-1].lower().startswith("deepseek")
 
 
 def build_request_kwargs(
@@ -44,9 +50,17 @@ def build_request_kwargs(
     """Build Chat Completions arguments for the OpenCode Go gateway."""
     kwargs = base_request_kwargs(model_config.model, messages, json_mode=json_mode)
     extra_body = dict(model_config.options.extra_body)
-    if model_config.options.thinking:
-        # Keep optional thinking fields out of the default path; gateways vary.
+    thinking = model_config.options.thinking
+    if thinking:
         extra_body.setdefault("reasoning_effort", model_config.options.reasoning_effort)
+    elif (
+        thinking is False
+        and _is_deepseek(model_config.model)
+        and "reasoning_effort" not in extra_body
+    ):
+        # The gateway enables DeepSeek reasoning when a request omits a control, so an
+        # explicit False must disable it. Thinking-only models such as GLM reject the flag.
+        extra_body.setdefault("thinking", {"type": "disabled"})
     if extra_body:
         kwargs["extra_body"] = deep_merge({}, extra_body)
     if max_tokens is not None:

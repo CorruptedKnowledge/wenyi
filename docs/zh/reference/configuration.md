@@ -200,7 +200,8 @@ llm:
 | 模型选项 | 适用类型 | 默认值／约束 |
 |---|---|---|
 | `thinking` | DeepSeek、OpenAI、OpenRouter | `true` |
-| `thinking` | OpenCode Go 与兼容类型 | `false` |
+| `thinking` | OpenCode Go | 默认不设置，由网关决定（DeepSeek 会推理）。`false` 关闭 DeepSeek 推理。 |
+| `thinking` | 兼容类型 | `false` |
 | `reasoning_effort` | 上述类型 | `high`；远端接受的值依端点／模型而定。 |
 | `extra_body` | DeepSeek、OpenAI、OpenRouter、OpenCode Go、Gemini | `{}`，端点专属请求扩展。 |
 | `thinking_level` | Gemini | 默认不设置，与 `thinking_budget` 互斥。 |
@@ -212,7 +213,23 @@ llm:
 “兼容类型”指 `openai-compatible`、`orcarouter`、`ollama` 和 `vllm`。
 它们还支持**连接级** `llm.providers.<id>.reasoning_style`：
 `none`（默认）、`deepseek`、`openai` 或 `openrouter`。
-`fake` 不接受模型选项。OpenCode Go 自动发送 Wenyi 身份／会话请求头。
+`fake` 不接受模型选项。OpenCode Go 自动发送 Wenyi 身份／会话请求头。对其他网关模型，
+`thinking: false` 保持网关默认值，因为部分模型只能在思考模式下运行。若只想在收益较小的步骤
+关闭推理，可把这些操作路由到同一模型的第二个配置，例如术语表步骤：
+
+```yaml
+llm:
+  models:
+    glossary_fast:
+      provider: default
+      model: deepseek-v4.1-flash
+      options: {thinking: false}
+  routes:
+    glossary.extract: {model: glossary_fast}
+    glossary.align_history: {model: glossary_fast}
+```
+
+这样快得多，但不推理时抽取到的新术语更少，且会收录更多类似整句的条目。
 
 DeepSeek 推理强度支持 `low`、`high` 和 `max`；
 `thinking: false` 关闭思考并省略强度参数。
