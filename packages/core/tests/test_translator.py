@@ -103,6 +103,33 @@ class TestTranslatorAlignment(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(single_calls), 3)
 
+    def test_per_segment_fallback_runs_concurrently_in_source_order(self):
+        import threading
+        import time
+
+        lock = threading.Lock()
+        active = peak = 0
+
+        def handler(messages, tier, json_mode):
+            nonlocal active, peak
+            user = messages[-1]["content"]
+            if _count_segments(user) > 1:
+                return json.dumps({"translations": []})
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            source = re.search(r"^\[0\] (.*)$", user, re.MULTILINE).group(1)
+            return json.dumps({"translations": [f"译{source}"]}, ensure_ascii=False)
+
+        sources = ["あ", "い", "う", "え", "お"]
+        out = Translator(FakeClient(handler=handler), self._config()).translate_batch(sources)
+
+        self.assertEqual(out, [f"译{s}" for s in sources])
+        self.assertGreater(peak, 1)
+
     def test_empty_per_segment_fallback_is_rejected(self):
         client = FakeClient(
             handler=lambda messages, tier, json_mode: json.dumps({"translations": [""]})
