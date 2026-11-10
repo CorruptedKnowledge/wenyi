@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass
 
 from ...agents.polisher import Polisher
@@ -76,9 +76,14 @@ class TranslationBatchExecutor:
         self._polisher = polisher
 
     def execute(self, plan: BatchPlan, *, polish: bool) -> BatchResult:
-        """Translate and optionally polish; the chapter service alone applies the result."""
+        """Translate and optionally polish; the chapter service alone applies the result.
+
+        Safe to call from several threads: each call keeps its translation conversation on
+        its own translator copy.
+        """
         terms = list(plan.terms)
-        targets = self._translator.translate_batch(
+        translator = copy(self._translator)
+        targets = translator.translate_batch(
             list(plan.sources),
             glossary_terms=terms,
             style=plan.style,
@@ -93,8 +98,8 @@ class TranslationBatchExecutor:
         before_polish: tuple[str | None, ...] = (None,) * len(targets)
         if polish:
             before_polish = tuple(targets)
-            turn = self._translator.last_batch_turn
-            indices = self._translator.last_batch_indices
+            turn = translator.last_batch_turn
+            indices = translator.last_batch_indices
             polished: list[str] | None = None
             if turn is not None and indices is not None:
                 # Continue the translation conversation and restore filtered source positions.

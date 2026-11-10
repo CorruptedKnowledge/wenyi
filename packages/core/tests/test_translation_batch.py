@@ -261,3 +261,75 @@ class TestTranslationService(unittest.TestCase):
                     ]
                 ],
             )
+
+
+@pytest.mark.parametrize("lookahead", [True, False])
+def test_lookahead_uses_only_requests_identical_to_the_serial_order(tmp_path, lookahead):
+    """Batch N+1 is translated during batch N's extraction and kept only when the
+    glossary that extraction produced leaves its request unchanged."""
+    import threading
+
+    cfg = _config(str(tmp_path / "state"))
+    cfg.pipeline.polish = False
+    cfg.pipeline.annotation_alignment = False
+    cfg.segment.max_tokens_per_batch = 4
+    sources = ["甲甲甲", "乙乙乙", "丙堀北，堀北"]
+    store = FileStorage(str(tmp_path / "state" / "book"))
+    store.save_chapter(
+        Chapter(index=0, segments=[Segment(index=i, source=s) for i, s in enumerate(sources)])
+    )
+    store.save_manifest(
+        {
+            "title": "Book",
+            "fmt": "epub",
+            "source_lang": "zh",
+            "target_lang": "en",
+            "chapters": [{"index": 0, "title": "", "status": "pending"}],
+        }
+    )
+    extracted = threading.Event()
+    lock = threading.Lock()
+    translated: list[str] = []
+
+    def handler(messages, tier, json_mode):
+        system, user = messages[0]["content"], messages[-1]["content"]
+        if "terminology" in system and "extractor" in system:
+            # The second batch's extraction introduces a term the third batch contains.
+            term = [{"source": "堀北", "target": "Horikita", "type": "person"}]
+            if "乙乙乙" in user:
+                extracted.set()
+                return json.dumps({"terms": term}, ensure_ascii=False)
+            return json.dumps({"terms": []})
+        if "literary translator" in system:
+            with lock:
+                translated.append(user)
+            return json.dumps({"translations": ["T"]})
+        return routing_handler(messages, tier, json_mode)
+
+    client = FakeClient(handler=handler)
+    orch = Orchestrator(cfg, client)
+    if not lookahead:
+        patch.object(orch._translation, "_lookahead", return_value=None).start()
+    try:
+        orch._translation.run(store, book_synopsis="")
+    finally:
+        patch.stopall()
+
+    events = [
+        json.loads(line)
+        for line in open(os.path.join(store.run_dir, "events.jsonl"), encoding="utf-8")
+    ]
+    decisions = [e["accepted"] for e in events if e["event"] == "batch_lookahead"]
+    used = [e for e in events if e["event"] == "batch_translated"]
+    assert [s["target"] for e in used for s in e["segments"]] == ["T", "T", "T"]
+    assert store.pending_chapters() == []
+    if lookahead:
+        # Batch 2 matched the serial request; batch 3 was retranslated with the new term.
+        assert decisions == [True, False]
+        assert len(translated) == 4
+        # The discarded early request lacked the term; the request that was used carries it.
+        assert sorted("Horikita" in request for request in translated[2:]) == [False, True]
+    else:
+        assert decisions == []
+        assert len(translated) == 3
+        assert "Horikita" in translated[-1]

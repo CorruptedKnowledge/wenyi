@@ -11,16 +11,23 @@ overwriting targets.
 
 from __future__ import annotations
 
+import contextvars
 import re
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
+from concurrent import futures
+from concurrent.futures import Future
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ...agents.glossary_extractor import TranslatedSegmentEvidence
+from ...agents.prompts import render_glossary
 from ...config import PipelineConfig
 from ...events import ProgressFn
 from ...glossary.prompt_scope import prompt_terms
 from ...glossary.store import GlossaryStore
 from ...models.document import Chapter, Segment
+from ...models.glossary import GlossaryTerm
 from ...storage.protocol import Storage
 from ...storage.run_store import STATUS_DONE
 from ..annotate.docx_styles import DocxStyleService
@@ -102,8 +109,9 @@ class TranslationService:
             total_segments=total,
             allow_empty_translations=allow_empty_translations,
         )
+        lookahead = self._lookahead(terminology)
         try:
-            for ci in targets:
+            for position, ci in enumerate(targets):
                 done = self.translate_chapter(
                     ci,
                     store,
@@ -118,6 +126,8 @@ class TranslationService:
                     total=total,
                     allow_empty_translations=allow_empty_translations,
                     terminology=terminology,
+                    lookahead=lookahead,
+                    following=targets[position + 1] if position + 1 < len(targets) else None,
                 )
                 self._runtime.usage.flush(store, scope="chapter")
             # Translate chapter/TOC titles after the body; keep the original book title and use glossary names.
@@ -125,6 +135,8 @@ class TranslationService:
                 self._titles.run(store, glossary, progress=progress)
                 self._annotations.repair_fallbacks(store, progress=progress)
         finally:
+            if lookahead is not None:
+                lookahead.drain()
             self._runtime.usage.flush(store, scope="translate")
         if progress and total:
             progress(total, total, "Translation complete")
@@ -233,9 +245,15 @@ class TranslationService:
         total: int = 0,
         allow_empty_translations: bool = False,
         terminology: TerminologyService | None = None,
+        lookahead: _BatchLookahead | None = None,
+        following: int | None = None,
     ) -> int:
         """Translate, polish, extract and persist one chapter; return the updated
         completed-paragraph count.
+
+        With ``lookahead``, a batch is translated while the previous batch's terms are
+        extracted, and the first batch of ``following`` while this chapter's last extractions
+        run. Early results are used only when the model would see the same request.
         """
         with store.state_lock():
             chapter = store.load_chapter(ci)
@@ -271,170 +289,213 @@ class TranslationService:
         # This preserves pronoun, term and voice continuity between batches within a chapter.
         # Skip saved complete batches on resume and reconstruct context without retranslating them.
         seg_base = 0  # Chapter-local index of this batch's first paragraph, used to map local issue indices.
-        for b in batches:
-            batch_start = seg_base
-            glossary_key = store.batch_glossary_key(batch_start, len(b))
-            if all(s.target is not None for s in b):
-                # Reuse a batch translated at this position/context, rebuild rolling context and skip it.
-                # Blank "" is a completed MinerU allowance; only None means not yet translated.
-                self._align_batch_context(store, chapter, batch_start, len(b))
-                if glossary_key in glossary_checkpoints or (
-                    context_policy is not None
-                    and self._glossary_checkpoint_covers(glossary_checkpoints, batch_start, len(b))
-                ):
-                    summary = {
-                        "inserted": 0,
-                        "conflict": 0,
-                        "unchanged": 0,
-                        "updated": 0,
-                        "skipped": 1,
-                    }
-                else:
-                    # Targets exist but extraction checkpoint is missing: extract and store terms now.
-                    summary = self.extract_batch_glossary(
-                        glossary,
-                        store,
-                        ci,
-                        batch_start,
-                        b,
-                        translation_history,
-                        source_corpus,
-                        terminology=terminology,
+        owns_lookahead = lookahead is None
+        if owns_lookahead:
+            lookahead = self._lookahead(terminology)
+        speculative = lookahead.take_carry(ci) if lookahead is not None else None
+        try:
+            for position, b in enumerate(batches):
+                batch_start = seg_base
+                glossary_key = store.batch_glossary_key(batch_start, len(b))
+                if all(s.target is not None for s in b):
+                    # Reuse a batch translated at this position/context, rebuild rolling context and skip it.
+                    # Blank "" is a completed MinerU allowance; only None means not yet translated.
+                    self._align_batch_context(store, chapter, batch_start, len(b))
+                    if glossary_key in glossary_checkpoints or (
+                        context_policy is not None
+                        and self._glossary_checkpoint_covers(
+                            glossary_checkpoints, batch_start, len(b)
+                        )
+                    ):
+                        summary = {
+                            "inserted": 0,
+                            "conflict": 0,
+                            "unchanged": 0,
+                            "updated": 0,
+                            "skipped": 1,
+                        }
+                    else:
+                        # Targets exist but extraction checkpoint is missing: extract and store terms now.
+                        summary = self.extract_batch_glossary(
+                            glossary,
+                            store,
+                            ci,
+                            batch_start,
+                            b,
+                            translation_history,
+                            source_corpus,
+                            terminology=terminology,
+                        )
+                        glossary_checkpoints.add(glossary_key)
+                        term_snapshot_stale = True
+                    store.log_event(
+                        "batch_skipped",
+                        chapter=ci,
+                        start_index=batch_start,
+                        count=len(b),
+                        reason="already_translated",
+                        glossary_extraction=summary,
+                        segments=[
+                            {"index": seg_base + i, "source": s.source, "target": s.target}
+                            for i, s in enumerate(b)
+                        ],
                     )
-                    glossary_checkpoints.add(glossary_key)
+                    seg_base += len(b)
+                    if progress:
+                        progress(done, total, label)
+                    continue
+
+                if terminology is not None:
+                    terminology.prepare_batch(
+                        ci,
+                        b,
+                        extractor=self._runtime.extractor,
+                        history=translation_history.values(),
+                        before=(ci, batch_start),
+                    )
                     term_snapshot_stale = True
+                if term_snapshot_stale:
+                    term_snapshot = glossary.all_terms()
+                    term_snapshot_stale = False
+                plan = self._capture_plan(
+                    store,
+                    chapter,
+                    batch_start,
+                    b,
+                    term_snapshot,
+                    analysis,
+                    style,
+                    book_synopsis,
+                    chapter_digest,
+                    annotation_contexts,
+                    context_policy,
+                    allow_empty_translations=allow_empty_translations,
+                )
+                if self._runtime.config.pipeline.translation_mode == "three_draft_synthesis":
+
+                    def checkpoint_precision_usage() -> None:
+                        self._runtime.usage.flush(store, scope="precision")
+
+                    result = self._precision.execute(
+                        plan,
+                        store,
+                        checkpoint=checkpoint_precision_usage,
+                        progress=(
+                            (lambda phase: progress(done, total, f"{label} · {phase}"))
+                            if progress
+                            else None
+                        ),
+                    )
+                    chapter = self.save_precision_batch(store, plan, result)
+                    text_segs = chapter.text_segments
+                    b = text_segs[batch_start : batch_start + len(b)]
+                    self._precision.mark_published(store, result)
+                else:
+                    result = None
+                    if speculative is not None:
+                        accepted = self._same_request(speculative[0], plan)
+                        store.log_event(
+                            "batch_lookahead",
+                            chapter=ci,
+                            start_index=batch_start,
+                            count=len(b),
+                            accepted=accepted,
+                        )
+                        if accepted:
+                            result = speculative[1].result()
+                        speculative = None
+                    if result is None:
+                        result = self._batches.execute(
+                            plan, polish=self._runtime.config.pipeline.polish
+                        )
+                    for segment, target, before_polish in zip(
+                        b, result.targets, result.before_polish
+                    ):
+                        segment.target = target
+                        segment.target_before_polish = before_polish
+                    # Persist translations incrementally so interruption resumes after this batch.
+                    store.save_chapter(chapter)
+                self._align_batch_context(store, chapter, batch_start, len(b))
                 store.log_event(
-                    "batch_skipped",
+                    "batch_translated",
                     chapter=ci,
                     start_index=batch_start,
                     count=len(b),
-                    reason="already_translated",
-                    glossary_extraction=summary,
+                    polished=self._runtime.config.pipeline.polish,
+                    translation_mode=self._runtime.config.pipeline.translation_mode,
                     segments=[
-                        {"index": seg_base + i, "source": s.source, "target": s.target}
+                        {
+                            "index": batch_start + i,
+                            "source": s.source,
+                            "target": s.target,
+                        }
                         for i, s in enumerate(b)
                     ],
                 )
+                done += len(b)
                 seg_base += len(b)
                 if progress:
                     progress(done, total, label)
-                continue
-
-            if terminology is not None:
-                terminology.prepare_batch(
-                    ci,
-                    b,
-                    extractor=self._runtime.extractor,
-                    history=translation_history.values(),
-                    before=(ci, batch_start),
-                )
-                term_snapshot_stale = True
-            if term_snapshot_stale:
-                term_snapshot = glossary.all_terms()
-                term_snapshot_stale = False
-            batch_style = (
-                self._runtime.analyzer.style_brief(
-                    analysis,
-                    terms=term_snapshot
-                    if self._runtime.config.pipeline.terminology_context
-                    else None,
-                )
-                if analysis is not None
-                else style
-            )
-
-            next_index = batch_start + len(b)
-            body_context = context_policy is None or context_policy.body[batch_start]
-            ctx_text = (
-                self.recent_context(store, chapter, batch_start, context_policy)
-                if body_context
-                else ""
-            )
-            next_source = (
-                self.following_source(store, chapter, next_index, context_policy)
-                if body_context
-                else ""
-            )
-            plan = BatchPlan.capture(
-                ci,
-                batch_start,
-                b,
-                # Send what this batch can use, not everything the book has collected so far.
-                prompt_terms(
-                    term_snapshot,
-                    "\n".join(segment.source for segment in b),
-                    budget=self._runtime.config.pipeline.glossary_prompt_tokens,
-                ),
-                ctx_text,
-                batch_style,
-                book_synopsis if body_context else "",
-                chapter_digest if body_context else "",
-                annotation_contexts[batch_start : batch_start + len(b)],
-                next_source,
-                allow_empty_translations=allow_empty_translations,
-            )
-            if self._runtime.config.pipeline.translation_mode == "three_draft_synthesis":
-
-                def checkpoint_precision_usage() -> None:
-                    self._runtime.usage.flush(store, scope="precision")
-
-                result = self._precision.execute(
-                    plan,
+                if lookahead is not None and position + 1 < len(batches):
+                    upcoming = batches[position + 1]
+                    if all(segment.target is None for segment in upcoming):
+                        # Translate the next batch while this batch's terms are extracted. The
+                        # result is used only if the plan built after extraction is identical,
+                        # so every accepted request matches what the serial order would send.
+                        if term_snapshot_stale:
+                            term_snapshot = glossary.all_terms()
+                            term_snapshot_stale = False
+                        following_plan = self._capture_plan(
+                            store,
+                            chapter,
+                            seg_base,
+                            upcoming,
+                            term_snapshot,
+                            analysis,
+                            style,
+                            book_synopsis,
+                            chapter_digest,
+                            annotation_contexts,
+                            context_policy,
+                            allow_empty_translations=allow_empty_translations,
+                        )
+                        speculative = (following_plan, lookahead.submit(following_plan))
+                elif lookahead is not None and following is not None:
+                    # Last batch: start the next chapter while this one finishes extraction.
+                    if term_snapshot_stale:
+                        term_snapshot = glossary.all_terms()
+                        term_snapshot_stale = False
+                    first = self._first_plan(
+                        store,
+                        following,
+                        term_snapshot,
+                        analysis,
+                        style,
+                        book_synopsis,
+                        annotation_context_registry,
+                        allow_empty_translations=allow_empty_translations,
+                    )
+                    if first is not None:
+                        lookahead.carry(following, first)
+                # Persist targets before glossary extraction so interruption cannot leave terms ahead of text.
+                self.extract_batch_glossary(
+                    glossary,
                     store,
-                    checkpoint=checkpoint_precision_usage,
-                    progress=(
-                        (lambda phase: progress(done, total, f"{label} · {phase}"))
-                        if progress
-                        else None
-                    ),
+                    ci,
+                    batch_start,
+                    b,
+                    translation_history,
+                    source_corpus,
+                    terminology=terminology,
                 )
-                chapter = self.save_precision_batch(store, plan, result)
-                text_segs = chapter.text_segments
-                b = text_segs[batch_start : batch_start + len(b)]
-                self._precision.mark_published(store, result)
-            else:
-                result = self._batches.execute(plan, polish=self._runtime.config.pipeline.polish)
-                for segment, target, before_polish in zip(b, result.targets, result.before_polish):
-                    segment.target = target
-                    segment.target_before_polish = before_polish
-                # Persist translations incrementally so interruption resumes after this batch.
-                store.save_chapter(chapter)
-            self._align_batch_context(store, chapter, batch_start, len(b))
-            store.log_event(
-                "batch_translated",
-                chapter=ci,
-                start_index=batch_start,
-                count=len(b),
-                polished=self._runtime.config.pipeline.polish,
-                translation_mode=self._runtime.config.pipeline.translation_mode,
-                segments=[
-                    {
-                        "index": batch_start + i,
-                        "source": s.source,
-                        "target": s.target,
-                    }
-                    for i, s in enumerate(b)
-                ],
-            )
-            done += len(b)
-            seg_base += len(b)
-            if progress:
-                progress(done, total, label)
-            # Persist targets before glossary extraction so interruption cannot leave terms ahead of text.
-            self.extract_batch_glossary(
-                glossary,
-                store,
-                ci,
-                batch_start,
-                b,
-                translation_history,
-                source_corpus,
-                terminology=terminology,
-            )
-            self.update_translation_history(translation_history, ci, batch_start, b)
-            glossary_checkpoints.add(glossary_key)
-            # The glossary may have changed; refresh before the next real translation, not after the final batch.
-            term_snapshot_stale = True
+                self.update_translation_history(translation_history, ci, batch_start, b)
+                glossary_checkpoints.add(glossary_key)
+                # The glossary may have changed; refresh before the next real translation, not after the final batch.
+                term_snapshot_stale = True
+        finally:
+            if lookahead is not None and owns_lookahead:
+                # Never leave a request running past the chapter, including on interruption.
+                lookahead.drain()
 
         # Keep chapter-wide extraction as a fallback for address, speech and fixed expressions needing context.
         # Final review reads the stable glossary after the entire book finishes translating.
@@ -464,6 +525,123 @@ class TranslationService:
             segment_count=len(text_segs),
         )
         return done
+
+    def _lookahead(self, terminology: TerminologyService | None) -> _BatchLookahead | None:
+        """Overlap translation with extraction only where batch plans are comparable."""
+        if self._runtime.config.pipeline.translation_mode != "standard" or terminology is not None:
+            return None
+        polish = self._runtime.config.pipeline.polish
+        return _BatchLookahead(lambda plan: self._batches.execute(plan, polish=polish))
+
+    def _first_plan(
+        self,
+        store: Storage,
+        ci: int,
+        term_snapshot: list[GlossaryTerm],
+        analysis: dict[str, Any] | None,
+        style: str,
+        book_synopsis: str,
+        annotation_context_registry: dict[str, Any] | None,
+        *,
+        allow_empty_translations: bool,
+    ) -> BatchPlan | None:
+        """Plan the first batch of chapter ``ci`` when it is still untranslated."""
+        chapter = store.load_chapter(ci)
+        text_segs = chapter.text_segments
+        batches = self._chapter_batches(chapter)
+        if not text_segs or not batches or any(s.target is not None for s in batches[0]):
+            return None
+        return self._capture_plan(
+            store,
+            chapter,
+            0,
+            batches[0],
+            term_snapshot,
+            analysis,
+            style,
+            book_synopsis,
+            chapter.meta.get("source_digest", ""),
+            self._annotations.annotation_contexts_for_segments(
+                text_segs, annotation_context_registry
+            ),
+            BabeldocContext.for_chapter(chapter),
+            allow_empty_translations=allow_empty_translations,
+        )
+
+    def _same_request(self, early: BatchPlan, current: BatchPlan) -> bool:
+        """Return whether both plans make the model see identical prompts.
+
+        Terms are compared as the translator and polisher render them, so a status or note
+        change that never reaches the prompt does not discard the early result.
+        """
+        if replace(early, terms=()) != replace(current, terms=()):
+            return False
+        return self._rendered_terms(early) == self._rendered_terms(current)
+
+    def _rendered_terms(self, plan: BatchPlan) -> str:
+        translator = self._runtime.translator
+        return render_glossary(
+            list(plan.terms),
+            source_lang=translator.src,
+            genre=translator.language_policy.context.genre,
+            note_source="\n".join(plan.sources)
+            if self._runtime.config.pipeline.terminology_context
+            else None,
+        )
+
+    def _capture_plan(
+        self,
+        store: Storage,
+        chapter: Chapter,
+        batch_start: int,
+        batch: list[Segment],
+        term_snapshot: list[GlossaryTerm],
+        analysis: dict[str, Any] | None,
+        style: str,
+        book_synopsis: str,
+        chapter_digest: str,
+        annotation_contexts: list[list[dict[str, str]]],
+        context_policy: BabeldocContext | None,
+        *,
+        allow_empty_translations: bool,
+    ) -> BatchPlan:
+        """Build the complete request inputs for one batch from the current formal state."""
+        batch_style = (
+            self._runtime.analyzer.style_brief(
+                analysis,
+                terms=term_snapshot if self._runtime.config.pipeline.terminology_context else None,
+            )
+            if analysis is not None
+            else style
+        )
+        next_index = batch_start + len(batch)
+        body_context = context_policy is None or context_policy.body[batch_start]
+        ctx_text = (
+            self.recent_context(store, chapter, batch_start, context_policy) if body_context else ""
+        )
+        next_source = (
+            self.following_source(store, chapter, next_index, context_policy)
+            if body_context
+            else ""
+        )
+        return BatchPlan.capture(
+            chapter.index,
+            batch_start,
+            batch,
+            # Send what this batch can use, not everything the book has collected so far.
+            prompt_terms(
+                term_snapshot,
+                "\n".join(segment.source for segment in batch),
+                budget=self._runtime.config.pipeline.glossary_prompt_tokens,
+            ),
+            ctx_text,
+            batch_style,
+            book_synopsis if body_context else "",
+            chapter_digest if body_context else "",
+            annotation_contexts[batch_start : batch_start + len(batch)],
+            next_source,
+            allow_empty_translations=allow_empty_translations,
+        )
 
     def _align_batch_context(
         self,
@@ -642,3 +820,50 @@ class TranslationService:
         )
         for index in indices if following else reversed(indices):
             yield store.load_chapter(index)
+
+
+class _BatchLookahead:
+    """Run translate/polish requests ahead of glossary extraction on daemon threads.
+
+    Results are pure; the chapter service decides whether to use them and alone writes
+    formal state. A chapter's first batch can be carried over from the previous chapter.
+    """
+
+    def __init__(self, execute: Callable[[BatchPlan], BatchResult]):
+        self._execute = execute
+        self._pending: list[Future[BatchResult]] = []
+        self._carried: tuple[int, BatchPlan, Future[BatchResult]] | None = None
+
+    def submit(self, plan: BatchPlan) -> Future[BatchResult]:
+        future: Future[BatchResult] = Future()
+        context = contextvars.copy_context()
+
+        def run() -> None:
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                result = context.run(self._execute, plan)
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+
+        threading.Thread(target=run, name="wenyi-translation-lookahead", daemon=True).start()
+        self._pending = [pending for pending in self._pending if not pending.done()]
+        self._pending.append(future)
+        return future
+
+    def carry(self, chapter: int, plan: BatchPlan) -> None:
+        """Start the first batch of the next chapter and hold it for that chapter."""
+        self._carried = (chapter, plan, self.submit(plan))
+
+    def take_carry(self, chapter: int) -> tuple[BatchPlan, Future[BatchResult]] | None:
+        carried, self._carried = self._carried, None
+        if carried is None or carried[0] != chapter:
+            return None
+        return carried[1], carried[2]
+
+    def drain(self) -> None:
+        """Wait for submitted requests so none outlives the chapter that started it."""
+        futures.wait(self._pending)
+        self._pending.clear()
