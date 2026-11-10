@@ -117,8 +117,9 @@ def test_pretranslation_filters_nonpersons_before_history_and_refresh(tmp_path, 
 def test_mixed_pipeline_keeps_nonperson_backfill_without_enrichment(tmp_path):
     source, config, store = inputs(tmp_path)
     source.write_text(
+        # Each extracted term recurs, so extraction admits it as a new glossary entry.
         "# First\n\nAlice met Carl and Dora at the Tower with a sword.\n\n"
-        "# Later\n\nBeth waited for Alice.",
+        "# Later\n\nBeth waited for Alice. Dora left the sword in the Tower.",
         encoding="utf-8",
     )
 

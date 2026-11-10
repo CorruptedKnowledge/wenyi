@@ -516,7 +516,9 @@ def test_resume_refreshes_full_glossary_before_pending_batches(
     config.pipeline.polish = polish
     source = tmp_path / "book.txt"
     source.write_text(
-        "Alice waited by the window.\n\nThe door opened slowly.\n\nA letter arrived later.",
+        # Alice recurs, so extraction admits her as a new glossary entry.
+        "Alice waited by the window.\n\nThe door opened slowly for Alice.\n\n"
+        "A letter arrived later.",
         encoding="utf-8",
     )
 

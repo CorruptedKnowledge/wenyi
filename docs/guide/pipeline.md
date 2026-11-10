@@ -93,6 +93,14 @@ New terms and conflicts inform later batches; they do not automatically rewrite
 earlier translations. The glossary is authoritative for name mappings, while style
 guidance retains source identities and descriptive character information.
 
+Extraction keeps what later chapters need to render consistently: names, places,
+organizations, setting-specific terms and objects, forms of address for particular
+characters, and expressions that recur in the same wording. It leaves out common
+vocabulary with a standard translation, generic roles, sentences and one-off phrases.
+A new entry is added only when its source, or an alias of a named entity, occurs at
+least twice in the whole book. Entries already in the glossary are kept, and a
+different proposed translation for one still becomes a conflict.
+
 A glossary that fits `pipeline.glossary_prompt_tokens` (4,000 tokens by default) is
 sent whole with every pending body batch, extraction and fresh Reviewer request,
 including terms absent from the text. A larger glossary sends its **earliest entries
