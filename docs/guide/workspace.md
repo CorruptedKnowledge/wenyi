@@ -63,6 +63,8 @@ Use **Glossary** to add or edit source terms, translations, aliases, notes, type
 
 Search covers the whole glossary, including aliases, readings, and notes. Type filters apply to the results. Selecting all affects only the current page; changing pages or filters clears the selection. During a queued/running task, **Term details** remains available for reading and copying, but adding, importing, editing, deleting, and resolving conflicts are disabled.
 
+A conflict means a later passage was translated differently from an existing term. The current translation stays in use until you choose one. A proposal that differs only in letter case, character width, spacing, or punctuation is not a conflict, and an alternative already recorded for a term is not recorded again, even after you have resolved it.
+
 Import **CSV or JSON**. CSV needs `source` and `target` headers. Import checks existing source terms across the complete glossary, not only the visible page or filter. Export CSV/JSON to reuse the glossary; type labels follow the interface language, while stored/exported built-in type IDs remain English.
 
 ### Anki export

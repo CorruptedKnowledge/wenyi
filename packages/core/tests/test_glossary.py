@@ -13,6 +13,8 @@ from wenyi_core.glossary.store import (
     TYPE_PERSON,
     GlossaryStore,
     GlossaryTerm,
+    conflict_needed,
+    same_translation,
     source_matches_text,
 )
 
@@ -159,6 +161,69 @@ class TestGlossary(unittest.TestCase):
         self.assertEqual(term.target, "掘北")
         self.assertEqual(term.status, "ok")
         self.assertEqual(self.store.open_conflicts(), [])
+
+    def test_cosmetic_variant_is_not_a_conflict(self):
+        self.store.upsert_term(GlossaryTerm(source="市政厅", target="City Hall"), chapter=0)
+        for variant in ("city hall", "City-Hall", "CITY  HALL.", "Ｃｉｔｙ Ｈａｌｌ"):
+            with self.subTest(variant=variant):
+                result = self.store.upsert_term(
+                    GlossaryTerm(source="市政厅", target=variant, aliases=["厅"]), chapter=1
+                )
+                self.assertEqual(result, "unchanged")
+        term = self.store.get_term("市政厅")
+        assert term is not None
+        # The stored spelling wins; the variant only contributes metadata.
+        self.assertEqual((term.target, term.status, term.aliases), ("City Hall", "ok", ["厅"]))
+        self.assertEqual(self.store.open_conflicts(), [])
+
+    def test_repeated_alternative_is_recorded_once(self):
+        self.store.upsert_term(GlossaryTerm(source="老板", target="boss"), chapter=0)
+        self.assertEqual(
+            self.store.upsert_term(GlossaryTerm(source="老板", target="Chief"), chapter=1),
+            "conflict",
+        )
+        for chapter in (2, 3):
+            self.assertEqual(
+                self.store.upsert_term(GlossaryTerm(source="老板", target="chief"), chapter),
+                "unchanged",
+            )
+        # A genuinely new alternative is still recorded.
+        self.assertEqual(
+            self.store.upsert_term(GlossaryTerm(source="老板", target="owner"), chapter=4),
+            "conflict",
+        )
+        self.assertEqual(
+            [row["proposed_target"] for row in self.store.open_conflicts()], ["Chief", "owner"]
+        )
+
+    def test_rejected_alternative_does_not_reopen_the_term(self):
+        self.store.upsert_term(GlossaryTerm(source="老板", target="boss"), chapter=0)
+        self.store.upsert_term(GlossaryTerm(source="老板", target="chief"), chapter=1)
+        # Keep the current translation, as the conflict list's "keep current" does.
+        self.store.resolve_term("老板", "boss")
+        self.store.mark_conflicts_resolved("老板")
+
+        result = self.store.upsert_term(GlossaryTerm(source="老板", target="chief"), chapter=9)
+
+        self.assertEqual(result, "unchanged")
+        self.assertEqual(self.store.open_conflicts(), [])
+        term = self.store.get_term("老板")
+        assert term is not None
+        self.assertEqual((term.target, term.status), ("boss", "ok"))
+
+    def test_translation_equivalence_ignores_only_case_width_spacing_and_punctuation(self):
+        self.assertTrue(same_translation("Lance", "lance"))
+        self.assertTrue(same_translation("约翰·史密斯", "约翰史密斯"))
+        self.assertTrue(same_translation("Mr. White", "Mr White"))
+        self.assertFalse(same_translation("the boss", "boss"))
+        self.assertFalse(same_translation("criminal", "criminals"))
+        self.assertFalse(same_translation("堀北", "掘北"))
+        self.assertFalse(same_translation("カード", "カド"))
+        # Punctuation-only translations are compared exactly.
+        self.assertFalse(same_translation("……", "——"))
+        self.assertTrue(conflict_needed("boss", "owner", ["chief"]))
+        self.assertFalse(conflict_needed("boss", "Boss", []))
+        self.assertFalse(conflict_needed("boss", "Chief", ["chief"]))
 
     def test_concurrent_upserts_make_one_atomic_conflict_decision(self):
         path = os.path.join(self.tmp.name, "concurrent.db")

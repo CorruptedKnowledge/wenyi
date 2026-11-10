@@ -97,6 +97,32 @@ def _match_text(text: str) -> str:
 _WORD_BOUNDARY_SCRIPTS = ("LATIN", "GREEK", "CYRILLIC")
 
 
+def _translation_key(target: str) -> str:
+    """Reduce a translation to its letters, digits and marks, ignoring case and width."""
+    text = unicodedata.normalize("NFKC", target).casefold()
+    return "".join(char for char in text if unicodedata.category(char)[0] not in "PZ")
+
+
+def same_translation(first: str, second: str) -> bool:
+    """Report whether two translations differ only in case, width, spacing or punctuation."""
+    if first == second:
+        return True
+    first_key, second_key = _translation_key(first), _translation_key(second)
+    return bool(first_key) and first_key == second_key
+
+
+def conflict_needed(existing: str, proposed: str, earlier_proposals: Iterable[str]) -> bool:
+    """Decide whether a proposed translation for a stored term is a new conflict.
+
+    A cosmetic variant of the stored translation is not a conflict. Neither is an
+    alternative already recorded for the term, whether it is still open or was rejected,
+    so a repeated proposal neither adds a row nor reopens a decision.
+    """
+    if same_translation(existing, proposed):
+        return False
+    return not any(same_translation(earlier, proposed) for earlier in earlier_proposals)
+
+
 def search_term_page(
     terms: Iterable[GlossaryTerm], query: str, *, offset: int, limit: int
 ) -> tuple[list[GlossaryTerm], int]:
@@ -346,8 +372,9 @@ class GlossaryStore:
                     ),
                 )
                 result = "inserted"
-            elif existing.target == term.target:
-                # Merging aliases or filling missing fields is not a conflict.
+            elif same_translation(existing.target, term.target):
+                # Merging aliases or filling missing fields is not a conflict. A cosmetic
+                # variant keeps the stored spelling.
                 merged_aliases = sorted(set(existing.aliases) | set(term.aliases))
                 self.conn.execute(
                     """UPDATE glossary SET reading=COALESCE(NULLIF(?,''),reading),
@@ -362,6 +389,11 @@ class GlossaryStore:
                         term.source,
                     ),
                 )
+                result = "unchanged"
+            elif not conflict_needed(
+                existing.target, term.target, self._recorded_proposals(term.source)
+            ):
+                # This alternative is already recorded for the term; keep the glossary as is.
                 result = "unchanged"
             else:
                 # Different target: keep the established mapping and record the candidate for human resolution.
@@ -378,6 +410,13 @@ class GlossaryStore:
             if self._owns_connection:
                 self.conn.rollback()
             raise
+
+    def _recorded_proposals(self, source: str) -> list[str]:
+        """Return every alternative recorded for a term, open or resolved."""
+        rows = self.conn.execute(
+            "SELECT proposed_target FROM term_conflicts WHERE source=?", (source,)
+        ).fetchall()
+        return [row[0] for row in rows if row[0] is not None]
 
     def _log_conflict(self, source, existing_target, proposed_target, chapter):
         """Record one candidate-translation conflict within the current transaction."""
