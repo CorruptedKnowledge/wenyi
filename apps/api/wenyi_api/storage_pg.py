@@ -19,7 +19,13 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from wenyi_core.errors import WenyiError
-from wenyi_core.glossary.store import GlossaryStore, GlossaryTerm, search_term_page
+from wenyi_core.glossary.store import (
+    GlossaryStore,
+    GlossaryTerm,
+    conflict_needed,
+    same_translation,
+    search_term_page,
+)
 from wenyi_core.models.document import Chapter, Document, Segment
 from wenyi_core.storage.run_store import ExportSnapshotStore, source_sha256
 
@@ -765,7 +771,7 @@ class PostgresStorage:
                     ),
                 )
                 return "inserted"
-            if existing.target == term.target:
+            if same_translation(existing.target, term.target):
                 aliases = sorted(set(existing.aliases) | set(term.aliases))
                 conn.execute(
                     """UPDATE glossary SET reading=COALESCE(NULLIF(%s,''),reading),
@@ -781,6 +787,14 @@ class PostgresStorage:
                         term.source,
                     ),
                 )
+                return "unchanged"
+            earlier = conn.execute(
+                "SELECT proposed_target FROM term_conflicts WHERE project_id=%s AND source=%s",
+                (self.project_id, term.source),
+            ).fetchall()
+            if not conflict_needed(
+                existing.target, term.target, [row[0] for row in earlier if row[0] is not None]
+            ):
                 return "unchanged"
             conn.execute(
                 """INSERT INTO term_conflicts(project_id,source,existing_target,proposed_target,
