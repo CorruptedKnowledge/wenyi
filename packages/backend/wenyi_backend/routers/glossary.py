@@ -9,20 +9,24 @@ from contextlib import closing
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from wenyi_core.glossary.anki import export_anki_glossary
+from wenyi_core.glossary.store import GlossaryOccurrenceMatcher
 from wenyi_core.i18n.metadata import normalize_term_type
 from wenyi_core.models.glossary import GlossaryTerm
 
 from ..context import current_context
 from ..schemas import (
+    BulkDeleteResult,
     ConflictOut,
     GlossaryExportFormat,
     GlossaryImport,
+    KeepCurrentResult,
     Message,
     ResolveConflict,
     TermIn,
     TermLookup,
     TermOut,
     TermPage,
+    TermSources,
 )
 from .dependencies import project_write, read_storage_for, require_project, storage_for
 
@@ -122,6 +126,67 @@ def delete_term(pid: str, source: str) -> dict:
     return {"message": "deleted"}
 
 
+@router.get("/sources", response_model=list[str])
+def matching_sources(pid: str, q: str = "", type: str = "") -> list[str]:
+    """List every source the glossary page would show for this search and type filter."""
+    require_project(pid)
+    storage = read_storage_for(pid)
+    try:
+        term_type = normalize_term_type(type) if type else ""
+        _items, total = storage.list_terms_page(q=q, term_type=term_type, offset=0, limit=1)
+        if total == 0:
+            return []
+        items, _total = storage.list_terms_page(q=q, term_type=term_type, offset=0, limit=total)
+        return [term.source for term in items]
+    finally:
+        storage.close()
+
+
+@router.post("/bulk-delete", response_model=BulkDeleteResult)
+def bulk_delete(pid: str, body: TermSources) -> dict:
+    """Delete the named terms in one state transaction and close their conflicts."""
+    with project_write(pid) as (_project, storage):
+        deleted = 0
+        with storage.state_lock():
+            for source in dict.fromkeys(body.sources):
+                if storage.delete_term(source):
+                    storage.mark_conflicts_resolved(source)
+                    deleted += 1
+            storage.log_event("glossary_terms_deleted", requested=len(body.sources), count=deleted)
+    return {"deleted": deleted}
+
+
+@router.post("/one-off", response_model=list[TermOut])
+def one_off_terms(pid: str) -> list[dict]:
+    """Find terms whose source occurs fewer than twice in the whole book.
+
+    Extraction no longer admits such terms, because there is nothing to keep consistent.
+    This only lists them; deletion is a separate, explicit request. It is a POST because
+    reading every chapter takes longer than a read request may wait.
+    """
+    require_project(pid)
+    storage = read_storage_for(pid)
+    try:
+        if not storage.exists():
+            raise HTTPException(409, "Prepare the book before checking terms against it")
+        manifest = storage.load_manifest()
+        indices = sorted(
+            chapter["index"]
+            for chapter in manifest.get("chapters", [])
+            if isinstance(chapter.get("index"), int)
+        )
+        corpus = "\n".join(
+            segment.source
+            for index in indices
+            for segment in storage.load_chapter(index).text_segments
+        )
+        terms = storage.all_terms()
+    finally:
+        storage.close()
+    recurring = {id(term) for term in GlossaryOccurrenceMatcher(corpus).recurring_terms(terms)}
+    return [vars(term) for term in terms if id(term) not in recurring]
+
+
 @router.get("/conflicts", response_model=list[ConflictOut])
 def list_conflicts(pid: str) -> list[dict]:
     require_project(pid)
@@ -151,6 +216,24 @@ def resolve_conflict(pid: str, cid: int, body: ResolveConflict) -> dict:
             storage.mark_conflicts_resolved(existing.source)
             storage.log_event("glossary_conflict_resolved", source=existing.source, target=target)
     return {"message": "resolved"}
+
+
+@router.post("/conflicts/keep-current", response_model=KeepCurrentResult)
+def keep_current_translations(pid: str) -> dict:
+    """Close every open conflict by keeping each term's current translation."""
+    with project_write(pid) as (_project, storage):
+        with storage.state_lock():
+            rows = storage.open_conflicts()
+            sources = list(dict.fromkeys(row["source"] for row in rows))
+            for source in sources:
+                term = storage.get_term(source)
+                if term is not None:
+                    storage.resolve_term(source, term.target)
+                storage.mark_conflicts_resolved(source)
+            storage.log_event(
+                "glossary_conflicts_kept_current", terms=len(sources), conflicts=len(rows)
+            )
+    return {"terms": len(sources), "conflicts": len(rows)}
 
 
 @router.get("/export")

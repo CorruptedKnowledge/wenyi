@@ -19,6 +19,8 @@ import { ConflictList } from "./ConflictList";
 import { AddTermDialog } from "./dialogs/AddTermDialog";
 import { TermDetailsDialog } from "./dialogs/TermDetailsDialog";
 import { ImportDialog } from "./dialogs/ImportDialog";
+import { OneOffDialog } from "./dialogs/OneOffDialog";
+import { Button } from "../../components/ui/button";
 
 export default function GlossaryPage() {
   const { t: tr } = useI18n();
@@ -51,6 +53,7 @@ export default function GlossaryPage() {
   const [editTerm, setEditTerm] = useState<Term | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [importOpen, setImportOpen] = useState(false);
+  const [oneOffOpen, setOneOffOpen] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const exportRef = useRef<HTMLDivElement>(null);
 
@@ -143,6 +146,26 @@ export default function GlossaryPage() {
     onError: (e) => toast.error(errorMessage(e, tr)),
   });
 
+  // Delete every term the current search and type filter match, on all pages. The
+  // sources are listed again first, so a list that changed meanwhile is not deleted blind.
+  const matchingTotal = termPage?.total ?? 0;
+  const deleteMatching = useMutation({
+    mutationFn: async (expected: number) => {
+      const sources = await api.matchingTermSources(pid, {
+        q: searchQuery || undefined,
+        type: type || undefined,
+      });
+      if (sources.length !== expected) return null;
+      return api.bulkDeleteTerms(pid, sources);
+    },
+    onSuccess: (result) => {
+      invalidate();
+      if (result === null) toast.error(tr("glossary.matchingChanged"));
+      else toast.success(tr("glossary.termsDeleted", { count: result.deleted }));
+    },
+    onError: (e) => toast.error(errorMessage(e, tr)),
+  });
+
   const toggleSelect = (source: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -181,6 +204,7 @@ export default function GlossaryPage() {
             onCloseMenu={() => setExportMenuOpen(false)}
             onBlur={handleExportBlur}
             onImport={() => setImportOpen(true)}
+            onCleanup={() => setOneOffOpen(true)}
             onAdd={() => setAddOpen(true)}
           />
         }
@@ -212,6 +236,20 @@ export default function GlossaryPage() {
               </SelectItem>
             ))}
           </Select>
+          {(searchQuery || type) && matchingTotal > 0 && (
+            <Button
+              variant="outline"
+              disabled={busy || termsLoading || deleteMatching.isPending}
+              onClick={() => {
+                const count = matchingTotal;
+                if (confirm(tr("glossary.deleteAllMatchingConfirm", { count }))) {
+                  deleteMatching.mutate(count);
+                }
+              }}
+            >
+              {tr("glossary.deleteAllMatching", { count: matchingTotal })}
+            </Button>
+          )}
           <div className="ml-auto max-w-full">
             <TermPagination
               page={page}
@@ -276,6 +314,15 @@ export default function GlossaryPage() {
               onSaved={() => {
                 invalidate();
                 setAddOpen(false);
+              }}
+            />
+            <OneOffDialog
+              pid={pid}
+              open={oneOffOpen}
+              onClose={() => setOneOffOpen(false)}
+              onSaved={() => {
+                invalidate();
+                setOneOffOpen(false);
               }}
             />
             <ImportDialog

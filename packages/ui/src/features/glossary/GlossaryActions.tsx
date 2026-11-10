@@ -1,5 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
-import { ChevronDown, Download, Plus, Upload } from "lucide-react";
+import { ChevronDown, Download, Eraser, Plus, Upload } from "lucide-react";
 import { api } from "../../api/client";
 import type { GlossaryExportFormat } from "../../api/types";
 import { useI18n } from "../../i18n";
@@ -17,6 +17,7 @@ export function GlossaryActions({
   onCloseMenu,
   onBlur,
   onImport,
+  onCleanup,
   onAdd,
 }: {
   pid: string;
@@ -27,6 +28,7 @@ export function GlossaryActions({
   onCloseMenu: () => void;
   onBlur: (e: React.FocusEvent) => void;
   onImport: () => void;
+  onCleanup: () => void;
   onAdd: () => void;
 }) {
   const { t: tr } = useI18n();
@@ -75,6 +77,10 @@ export function GlossaryActions({
           </div>
         )}
       </div>
+      <Button variant="outline" disabled={busy} onClick={onCleanup}>
+        <Eraser className="h-4 w-4" />
+        {tr("glossary.oneOffAction")}
+      </Button>
       <Button variant="outline" disabled={busy} onClick={onImport}>
         <Upload className="h-4 w-4" />
         {tr("glossary.import")}

@@ -614,6 +614,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/projects/{pid}/glossary/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Matching Sources
+         * @description List every source the glossary page would show for this search and type filter.
+         */
+        get: operations["matching_sources_projects__pid__glossary_sources_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{pid}/glossary/bulk-delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bulk Delete
+         * @description Delete the named terms in one state transaction and close their conflicts.
+         */
+        post: operations["bulk_delete_projects__pid__glossary_bulk_delete_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{pid}/glossary/one-off": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * One Off Terms
+         * @description Find terms whose source occurs fewer than twice in the whole book.
+         *
+         *     Extraction no longer admits such terms, because there is nothing to keep consistent.
+         *     This only lists them; deletion is a separate, explicit request. It is a POST because
+         *     reading every chapter takes longer than a read request may wait.
+         */
+        post: operations["one_off_terms_projects__pid__glossary_one_off_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/projects/{pid}/glossary/conflicts": {
         parameters: {
             query?: never;
@@ -642,6 +706,26 @@ export interface paths {
         put?: never;
         /** Resolve Conflict */
         post: operations["resolve_conflict_projects__pid__glossary_conflicts__cid__resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{pid}/glossary/conflicts/keep-current": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Keep Current Translations
+         * @description Close every open conflict by keeping each term's current translation.
+         */
+        post: operations["keep_current_translations_projects__pid__glossary_conflicts_keep_current_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -950,6 +1034,11 @@ export interface components {
             /** Fmt */
             fmt?: string | null;
         };
+        /** BulkDeleteResult */
+        BulkDeleteResult: {
+            /** Deleted */
+            deleted: number;
+        };
         /** Capabilities */
         Capabilities: {
             /** Languages */
@@ -1193,6 +1282,13 @@ export interface components {
             project_id: string;
             /** Kind */
             kind: string;
+        };
+        /** KeepCurrentResult */
+        KeepCurrentResult: {
+            /** Terms */
+            terms: number;
+            /** Conflicts */
+            conflicts: number;
         };
         /** LanguageOption */
         LanguageOption: {
@@ -1798,6 +1894,11 @@ export interface components {
             items: components["schemas"]["TermOut"][];
             /** Total */
             total: number;
+        };
+        /** TermSources */
+        TermSources: {
+            /** Sources */
+            sources: string[];
         };
         /** UploadPreview */
         UploadPreview: {
@@ -3100,6 +3201,106 @@ export interface operations {
             };
         };
     };
+    matching_sources_projects__pid__glossary_sources_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                type?: string;
+            };
+            header?: never;
+            path: {
+                pid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": string[];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bulk_delete_projects__pid__glossary_bulk_delete_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TermSources"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkDeleteResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    one_off_terms_projects__pid__glossary_one_off_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TermOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_conflicts_projects__pid__glossary_conflicts_get: {
         parameters: {
             query?: never;
@@ -3154,6 +3355,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Message"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    keep_current_translations_projects__pid__glossary_conflicts_keep_current_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeepCurrentResult"];
                 };
             };
             /** @description Validation Error */

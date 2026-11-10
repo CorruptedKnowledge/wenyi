@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from wenyi_backend.routers import glossary
+from wenyi_core.models.document import Chapter, Document, Segment
 from wenyi_core.models.glossary import GlossaryTerm
 from wenyi_core.storage.sqlite import SqliteStorage
 
@@ -130,3 +131,161 @@ def test_anki_export_rejects_missing_projects(backend_context):
         backend_context.repository.get_project.return_value = None
         assert client.get("/projects/missing/glossary/export?format=apkg").status_code == 404
     backend_context.storage_for.assert_not_called()
+
+
+def _prepared_glossary(backend_context, tmp_path, chapters: list[str], terms: list[GlossaryTerm]):
+    """Serve a real prepared SQLite project through both storage factories."""
+    run_dir = str(tmp_path / "project")
+    (tmp_path / "book.txt").write_text("\n".join(chapters), encoding="utf-8")
+    storage = SqliteStorage(run_dir)
+    storage.init_from_document(
+        Document(
+            title="Book",
+            source_path=str(tmp_path / "book.txt"),
+            fmt="txt",
+            source_lang="zh",
+            target_lang="en",
+            chapters=[
+                Chapter(index=index, segments=[Segment(index=0, source=text)])
+                for index, text in enumerate(chapters)
+            ],
+        )
+    )
+    for term in terms:
+        storage.upsert_term(term)
+    storage.close()
+    backend_context.repository.get_project.return_value = {"id": "project-1", "status": "idle"}
+    backend_context.storage_for.side_effect = lambda pid: SqliteStorage(run_dir, create=False)
+    backend_context.read_storage_for.side_effect = lambda pid: SqliteStorage(run_dir, create=False)
+    app = FastAPI()
+    app.include_router(glossary.router)
+    return TestClient(app), run_dir
+
+
+def test_one_off_lists_terms_that_occur_once_in_the_whole_book(backend_context, tmp_path):
+    client, run_dir = _prepared_glossary(
+        backend_context,
+        tmp_path,
+        ["兰斯走进酒馆。手提箱放在桌上。", "兰斯又笑了。人名甲，人名乙。"],
+        [
+            GlossaryTerm(source="兰斯", target="Lance", type="person"),
+            GlossaryTerm(source="手提箱", target="suitcase", type="item"),
+            GlossaryTerm(source="人名甲", target="A", type="person", aliases=["人名乙"]),
+            GlossaryTerm(source="不存在", target="absent"),
+        ],
+    )
+    with client:
+        response = client.post("/projects/project-1/glossary/one-off")
+    assert response.status_code == 200, response.text
+    # A term counts across chapters, and an alias mention counts for named entities.
+    assert [term["source"] for term in response.json()] == ["手提箱", "不存在"]
+    storage = SqliteStorage(run_dir, create=False)
+    assert len(storage.all_terms()) == 4
+    storage.close()
+
+
+def test_one_off_requires_a_prepared_book(backend_context):
+    storage = Mock()
+    storage.exists.return_value = False
+    backend_context.repository.get_project.return_value = {"id": "project-1"}
+    backend_context.read_storage_for.return_value = storage
+    app = FastAPI()
+    app.include_router(glossary.router)
+    with TestClient(app) as client:
+        assert client.post("/projects/project-1/glossary/one-off").status_code == 409
+    storage.close.assert_called_once_with()
+
+
+def test_matching_sources_cover_every_page_of_the_filter(backend_context, tmp_path):
+    terms = [GlossaryTerm(source=f"词{index:03}", target="w", type="term") for index in range(250)]
+    terms.append(GlossaryTerm(source="人名", target="Name", type="person"))
+    client, _run_dir = _prepared_glossary(backend_context, tmp_path, ["正文。"], terms)
+    with client:
+        everything = client.get("/projects/project-1/glossary/sources").json()
+        generic = client.get("/projects/project-1/glossary/sources?type=term").json()
+        searched = client.get("/projects/project-1/glossary/sources?q=词24").json()
+        nothing = client.get("/projects/project-1/glossary/sources?q=absent").json()
+    assert len(everything) == 251
+    assert len(generic) == 250 and "人名" not in generic
+    assert searched == [f"词24{digit}" for digit in range(10)]
+    assert nothing == []
+
+
+def test_bulk_delete_removes_named_terms_and_closes_their_conflicts(backend_context, tmp_path):
+    client, run_dir = _prepared_glossary(
+        backend_context,
+        tmp_path,
+        ["正文。"],
+        [
+            GlossaryTerm(source="甲", target="A"),
+            GlossaryTerm(source="乙", target="B"),
+            GlossaryTerm(source="丙", target="C"),
+        ],
+    )
+    storage = SqliteStorage(run_dir, create=False)
+    storage.upsert_term(GlossaryTerm(source="甲", target="Other"))
+    storage.upsert_term(GlossaryTerm(source="丙", target="Other"))
+    storage.close()
+    with client:
+        response = client.post(
+            "/projects/project-1/glossary/bulk-delete", json={"sources": ["甲", "甲", "缺"]}
+        )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"deleted": 1}
+    storage = SqliteStorage(run_dir, create=False)
+    assert [term.source for term in storage.all_terms()] == ["乙", "丙"]
+    assert [row["source"] for row in storage.open_conflicts()] == ["丙"]
+    assert storage.list_events(event_type="glossary_terms_deleted")[0]["count"] == 1
+    storage.close()
+
+
+def test_keep_current_closes_every_conflict_without_changing_translations(
+    backend_context, tmp_path
+):
+    client, run_dir = _prepared_glossary(
+        backend_context,
+        tmp_path,
+        ["正文。"],
+        [GlossaryTerm(source="老板", target="boss"), GlossaryTerm(source="城", target="city")],
+    )
+    storage = SqliteStorage(run_dir, create=False)
+    for proposal in ("chief", "owner"):
+        storage.upsert_term(GlossaryTerm(source="老板", target=proposal))
+    storage.upsert_term(GlossaryTerm(source="城", target="town"))
+    storage.close()
+    with client:
+        response = client.post("/projects/project-1/glossary/conflicts/keep-current")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"terms": 2, "conflicts": 3}
+    storage = SqliteStorage(run_dir, create=False)
+    assert storage.open_conflicts() == []
+    assert [(term.target, term.status) for term in storage.all_terms()] == [
+        ("boss", "ok"),
+        ("city", "ok"),
+    ]
+    # A rejected alternative stays closed when extraction proposes it again.
+    assert storage.upsert_term(GlossaryTerm(source="老板", target="chief")) == "unchanged"
+    storage.close()
+
+
+@pytest.mark.parametrize(
+    "method,path,body",
+    [
+        ("post", "/projects/project-1/glossary/bulk-delete", {"sources": ["甲"]}),
+        ("post", "/projects/project-1/glossary/conflicts/keep-current", None),
+    ],
+)
+def test_bulk_writes_are_refused_while_a_task_runs(backend_context, tmp_path, method, path, body):
+    client, run_dir = _prepared_glossary(
+        backend_context, tmp_path, ["正文。"], [GlossaryTerm(source="甲", target="A")]
+    )
+    backend_context.repository.get_project.return_value = {
+        "id": "project-1",
+        "status": "translating",
+    }
+    with client:
+        response = getattr(client, method)(path, **({"json": body} if body else {}))
+    assert response.status_code == 409
+    storage = SqliteStorage(run_dir, create=False)
+    assert [term.source for term in storage.all_terms()] == ["甲"]
+    storage.close()

@@ -6,6 +6,7 @@ records unresolved translation conflicts.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -208,6 +209,17 @@ def _source_occurrence_spans(source: str, normalized_text: str) -> list[tuple[in
     return spans
 
 
+def _occurrence_count(key: str, normalized_text: str, limit: int) -> int:
+    """Count nonoverlapping occurrences of one normalized key, stopping at the limit."""
+    if pattern := _source_pattern(key):
+        return sum(1 for _ in itertools.islice(pattern.finditer(normalized_text), limit))
+    count = start = 0
+    while count < limit and (index := normalized_text.find(key, start)) != -1:
+        count += 1
+        start = index + len(key)
+    return count
+
+
 def _merged_occurrence_count(spans: set[tuple[int, int]]) -> int:
     """Merge overlapping source/alias matches at one location into a single mention."""
     count = 0
@@ -241,6 +253,12 @@ class GlossaryOccurrenceMatcher:
         for term in terms:
             raw_keys = term_match_sources(term)
             keys = {normalized for key in raw_keys if (normalized := _match_text(key).strip())}
+            if len(keys) == 1:
+                # One spelling cannot overlap itself, so its count is exact and can stop early.
+                (key,) = keys
+                if _occurrence_count(key, self.normalized_text, min_occurrences) >= min_occurrences:
+                    recurring.append(term)
+                continue
             spans: set[tuple[int, int]] = set()
             for key in keys:
                 spans.update(_source_occurrence_spans(key, self.normalized_text))

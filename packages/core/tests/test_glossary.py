@@ -162,6 +162,28 @@ class TestGlossary(unittest.TestCase):
         self.assertEqual(term.status, "ok")
         self.assertEqual(self.store.open_conflicts(), [])
 
+    def test_single_spelling_shortcut_matches_a_full_count(self):
+        from wenyi_core.glossary.store import (
+            GlossaryOccurrenceMatcher,
+            _match_text,
+            _source_occurrence_spans,
+        )
+
+        corpus = "Ann met Anna. ANN left; ann? 甲甲甲乙甲乙。гад, гадкий, Гад. ＡＢＣ abc"
+        sources = ["Ann", "Anna", "甲", "甲甲", "甲乙", "乙", "гад", "abc", "absent", "an"]
+        matcher = GlossaryOccurrenceMatcher(corpus)
+        for minimum in (1, 2, 3, 4):
+            with self.subTest(minimum=minimum):
+                expected = {
+                    source
+                    for source in sources
+                    if len(_source_occurrence_spans(_match_text(source), matcher.normalized_text))
+                    >= minimum
+                }
+                terms = [GlossaryTerm(source=source, target="t") for source in sources]
+                found = matcher.recurring_terms(terms, min_occurrences=minimum)
+                self.assertEqual({term.source for term in found}, expected)
+
     def test_cosmetic_variant_is_not_a_conflict(self):
         self.store.upsert_term(GlossaryTerm(source="市政厅", target="City Hall"), chapter=0)
         for variant in ("city hall", "City-Hall", "CITY  HALL.", "Ｃｉｔｙ Ｈａｌｌ"):

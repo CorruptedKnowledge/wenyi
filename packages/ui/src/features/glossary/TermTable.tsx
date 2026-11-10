@@ -10,18 +10,20 @@ export function TermPagination({
   page,
   total,
   disabled,
+  label,
   onChange,
 }: {
   page: number;
   total: number;
   disabled?: boolean;
+  label?: string;
   onChange: (page: number) => void;
 }) {
   const { t } = useI18n();
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
     <nav
-      aria-label={t("glossary.paginationLabel")}
+      aria-label={label ?? t("glossary.paginationLabel")}
       className="flex flex-wrap items-center justify-end gap-3"
     >
       <span role="status" className="text-sm text-muted-foreground">
