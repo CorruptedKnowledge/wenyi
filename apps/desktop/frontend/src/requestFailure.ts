@@ -28,11 +28,10 @@ export function routeShape(path: string): string {
 
 /** A deadline or a cancellation, whichever phase of the request it stopped. */
 function interruption(error: unknown): RequestFailure["category"] {
+  // The shared client has already told an expired deadline apart from a cancellation.
   if (error instanceof ApiError && error.code === "request_timeout") return "timeout";
-  if (!(error instanceof DOMException)) return undefined;
-  if (error.name === "TimeoutError") return "timeout";
   // The caller cancelled, usually because the view that asked went away.
-  return error.name === "AbortError" ? "interrupted" : undefined;
+  return error instanceof DOMException && error.name === "AbortError" ? "interrupted" : undefined;
 }
 
 /** Describe a failed request without its path, body, message or response text. */

@@ -61,27 +61,36 @@ export function withTimeout(
  *
  * Only the deadline is translated: an abort the caller asked for stays an abort,
  * so a canceled query is still cancelled rather than reported as a failure.
+ * WebKit rejects a fetch with a plain `AbortError` whatever aborted it, so there
+ * an expired deadline looks like a cancellation; the signal still knows why it fired.
  */
-function isTimeout(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "TimeoutError";
+function isTimeout(error: unknown, signal?: AbortSignal | null): boolean {
+  if (!(error instanceof DOMException)) return false;
+  if (error.name === "TimeoutError") return true;
+  const reason: unknown = signal?.reason;
+  return error.name === "AbortError"
+    && reason instanceof DOMException && reason.name === "TimeoutError";
 }
 
-/** Run a request, translating an expired deadline into the `ApiError` shape. */
+/** Run a request, translating an expired deadline into the `ApiError` shape.
+ *
+ * Pass the request's `signal` so a deadline is recognized on every engine, and
+ * whether it expired before the answer or while the answer was being read.
+ */
 export async function sendRequest<T>(
   request: () => Promise<Response>,
   decode: (response: Response) => Promise<T> = decodeResponse,
+  signal?: AbortSignal | null,
 ): Promise<T> {
-  let response: Response;
   try {
-    response = await request();
+    return await decode(await request());
   } catch (error) {
     // Without this the caller sees a host-specific `DOMException` that carries
     // neither a status nor a code, and no shared surface can describe it.
-    if (isTimeout(error))
+    if (isTimeout(error, signal))
       throw new ApiError({ status: 0, code: "request_timeout", detail: "request_timeout" });
     throw error;
   }
-  return await decode(response);
 }
 
 export async function decodeResponse<T>(response: Response): Promise<T> {

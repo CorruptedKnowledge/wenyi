@@ -8,10 +8,9 @@ import { requestFailure } from "./requestFailure";
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response | undefined;
   try {
+    const bounded = withTimeout({ ...init, headers: requestHeaders(init, authToken()) });
     return await sendRequest<T>(
-      async () => (response = await fetch(`${apiBase()}${path}`, withTimeout({
-        ...init, headers: requestHeaders(init, authToken()),
-      }))),
+      async () => (response = await fetch(`${apiBase()}${path}`, bounded)),
       async (answer) => {
         try {
           return await decodeResponse<T>(answer);
@@ -22,6 +21,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
           throw error;
         }
       },
+      bounded.signal,
     );
   } catch (error) {
     reportDiagnostic("frontend_request_failed", requestFailure(path, init?.method, error, response));

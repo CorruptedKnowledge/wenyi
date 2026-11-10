@@ -96,6 +96,40 @@ test("a stalled request fails as request_timeout instead of staying pending", as
   });
 });
 
+test("a deadline the engine reports as a plain abort is still a timeout", async () => {
+  // WebKit rejects with AbortError whatever aborted the fetch; the signal knows better.
+  const { signal } = withTimeout(undefined, 5);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const aborted = () => Promise.reject(new DOMException("Fetch is aborted", "AbortError"));
+  await assert.rejects(sendRequest(aborted, undefined, signal), (error) => {
+    assert.ok(error instanceof ApiError);
+    assert.equal(error.code, "request_timeout");
+    return true;
+  });
+});
+
+test("a deadline that expires while the answer is read is a timeout too", async () => {
+  const stalledBody = () =>
+    Promise.reject(new DOMException("The operation timed out.", "TimeoutError"));
+  await assert.rejects(
+    sendRequest(() => Promise.resolve(new Response("{}")), stalledBody),
+    (error) => error instanceof ApiError && error.code === "request_timeout",
+  );
+});
+
+test("a cancellation under a live deadline stays a cancellation", async () => {
+  const controller = new AbortController();
+  const { signal } = withTimeout({ signal: controller.signal }, 60_000);
+  controller.abort();
+  const canceled = () =>
+    Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+  await assert.rejects(sendRequest(canceled, undefined, signal), (error) => {
+    assert.ok(!(error instanceof ApiError));
+    assert.equal(error.name, "AbortError");
+    return true;
+  });
+});
+
 test("a caller's own cancellation is not reported as a failure", async () => {
   const canceled = () =>
     Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
