@@ -70,6 +70,13 @@ For each body batch:
 4. Extract terms from the completed pairs and checkpoint that extraction.
 5. Refresh the glossary snapshot before the next pending batch if it changed.
 
+In standard mode without terminology evidence, the next pending batch (or the next
+chapter's first batch) may be sent while step 4 runs. Its result is used only when the
+request built after the refresh, including the rendered glossary, is identical to the
+early one; otherwise it is discarded and the batch is sent again, so output matches
+serial execution. Speculative calls still record usage. When batch alignment fails,
+the single-paragraph fallback requests run concurrently and merge in source order.
+
 A completed target batch with no glossary checkpoint requires extraction, not
 retranslation. A fully checkpointed batch skips both. Chapter completion follows
 its required batch and chapter-level work. Keep interruption tests at the boundaries

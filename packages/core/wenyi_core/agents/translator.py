@@ -7,11 +7,16 @@ entire paragraphs from being omitted.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from ..llm.json_parser import JsonParseError
 from ..llm.retrying import TruncatedResponseError
 from ..models.glossary import GlossaryTerm
 from . import prompts
 from .base import Agent, Messages
+
+# Concurrent single-paragraph requests after a batch keeps failing alignment.
+_FALLBACK_WORKERS = 8
 
 
 class AlignmentError(Exception):
@@ -258,25 +263,34 @@ class Translator(Agent):
         self.last_batch_turn = None
         self.last_batch_indices = None
         targets = list(sources)
-        for index, source, annotation_context in zip(
-            translated_indices,
-            translated_sources,
-            translated_annotation_contexts,
-        ):
-            try:
-                targets[index] = self._translate_one(
-                    source,
-                    glossary_terms,
-                    style,
-                    context,
-                    book_synopsis,
-                    chapter_digest,
-                    annotation_context,
-                    next_source=sources[index + 1] if index + 1 < n else next_source,
-                    allow_empty_translations=allow_empty_translations,
-                )
-            except Exception as error:
-                raise AlignmentError(
-                    f"Single-paragraph fallback failed at paragraph {index}"
-                ) from error
+
+        def translate_one(position: int) -> str:
+            index = translated_indices[position]
+            return self._translate_one(
+                translated_sources[position],
+                glossary_terms,
+                style,
+                context,
+                book_synopsis,
+                chapter_digest,
+                translated_annotation_contexts[position],
+                next_source=sources[index + 1] if index + 1 < n else next_source,
+                allow_empty_translations=allow_empty_translations,
+            )
+
+        # Paragraph requests are independent, so they run concurrently; results and the first
+        # failure are still taken in source order.
+        workers = min(_FALLBACK_WORKERS, len(translated_indices))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(translate_one, p) for p in range(len(translated_indices))]
+            for position, future in enumerate(futures):
+                index = translated_indices[position]
+                try:
+                    targets[index] = future.result()
+                except Exception as error:
+                    for pending in futures:
+                        pending.cancel()
+                    raise AlignmentError(
+                        f"Single-paragraph fallback failed at paragraph {index}"
+                    ) from error
         return targets
