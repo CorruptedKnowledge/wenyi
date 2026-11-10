@@ -98,6 +98,14 @@ class TestConfigFileCreation(unittest.TestCase):
         with self.assertRaises(Exception):
             Config.from_dict({"segment": {"max_chars_per_batch": 99}})
 
+    def test_glossary_prompt_tokens_default_and_bounds(self):
+        self.assertEqual(Config.from_dict({}).pipeline.glossary_prompt_tokens, 4000)
+        self.assertIn("glossary_prompt_tokens: 4000", _DEFAULT_CONFIG_YAML)
+        cfg = Config.from_dict({"pipeline": {"glossary_prompt_tokens": 0}})
+        self.assertEqual(cfg.pipeline.glossary_prompt_tokens, 0)
+        with self.assertRaisesRegex(ValidationError, "glossary_prompt_tokens"):
+            Config.from_dict({"pipeline": {"glossary_prompt_tokens": -1}})
+
     def test_rolling_context_tokens_accept_zero_and_reject_negative_budgets(self):
         cfg = Config.from_dict({"pipeline": {"rolling_context_tokens": 0}})
         self.assertEqual(cfg.pipeline.rolling_context_tokens, 0)

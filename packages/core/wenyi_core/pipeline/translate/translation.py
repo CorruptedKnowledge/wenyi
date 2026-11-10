@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from ...agents.glossary_extractor import TranslatedSegmentEvidence
 from ...config import PipelineConfig
 from ...events import ProgressFn
+from ...glossary.prompt_scope import prompt_terms
 from ...glossary.store import GlossaryStore
 from ...models.document import Chapter, Segment
 from ...storage.protocol import Storage
@@ -259,7 +260,7 @@ class TranslationService:
         if progress:
             progress(done, total, label)
         glossary_checkpoints = store.completed_batch_glossary_keys(ci)
-        # Read the full glossary in stable insertion order at chapter start.
+        # Read the glossary snapshot in stable insertion order at chapter start.
         # Refresh lazily only if the glossary may have changed and another batch needs translation.
         # Fully checkpointed skips neither extract nor refresh. Saved translations lacking extraction
         # still extract and mark the snapshot stale, preserving resume completeness without redundant reads.
@@ -358,7 +359,12 @@ class TranslationService:
                 ci,
                 batch_start,
                 b,
-                term_snapshot,
+                # Send what this batch can use, not everything the book has collected so far.
+                prompt_terms(
+                    term_snapshot,
+                    "\n".join(segment.source for segment in b),
+                    budget=self._runtime.config.pipeline.glossary_prompt_tokens,
+                ),
                 ctx_text,
                 batch_style,
                 book_synopsis if body_context else "",

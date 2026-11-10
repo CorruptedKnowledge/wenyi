@@ -43,13 +43,15 @@ segment:
 
 # ── Pipeline options (quality and cost)───────────────────────────────────────────
 pipeline:
-  # Body translation and Reviewer requests always use the full glossary.
   review: true # Run final review after whole-book translation; disable with --no-review
   # Additional structural retries for standard translation and each precision stage; 0 disables retries.
   align_retry_limit: 2
   polish: true # Polish the full translation with the strong tier; enabled by default and adds substantial cost
   translation_mode: standard # standard | three_draft_synthesis; three_draft_synthesis requires polish
   rolling_context_tokens: 512 # Recent translation budget in tokens (tiktoken cl100k_base)
+  # Glossary budget per request in tokens. A larger glossary keeps its earliest entries
+  # within the budget, then only later entries whose source text occurs in the request.
+  glossary_prompt_tokens: 4000
   terminology_context: false # CLI-only experimental whole-book terminology evidence
   book_understanding: true # Prescan complete chapters for digests and a whole-book synopsis; disable to save prescan cost
   prescan_concurrency: 4 # Concurrent chapter-digest workers; chapters are independent, 1 runs serially
@@ -117,6 +119,8 @@ class PipelineConfig(BaseModel):
         True  # Polish the full translation with the strong tier by default; disable to save cost
     )
     rolling_context_tokens: int = Field(default=512, ge=0)
+    # Bound the glossary a request carries; relevant later entries are always added.
+    glossary_prompt_tokens: int = Field(default=4000, ge=0)
     # Experimental evidence production requires the CLI prepare/translate entrypoint.
     terminology_context: bool = False
     # Prescan for a synopsis and chapter digests; disable to save prescan cost.

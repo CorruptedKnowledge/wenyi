@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..config import Config
+from ..glossary.prompt_scope import prompt_terms
 from ..glossary.store import (
     TYPE_TERM,
     GlossaryOccurrenceMatcher,
@@ -327,13 +328,17 @@ class GlossaryExtractor(Agent):
         subsequent text.
         With source_corpus, inject only existing terms occurring at least twice in the
         source. Low-frequency terms remain stored but do not repeatedly consume extraction
-        context.
+        context. Either way the injected terms follow the glossary prompt budget, so a long
+        book does not resend every recurring term with every extraction.
         """
         all_existing = store.all_terms()
         existing = (
             self._recurring_existing_terms(all_existing, source_corpus)
             if source_corpus is not None
             else all_existing
+        )
+        existing = prompt_terms(
+            existing, source_text, budget=self.config.pipeline.glossary_prompt_tokens
         )
         terms = self.extract(source_text, target_text, existing)
         occurrences = (

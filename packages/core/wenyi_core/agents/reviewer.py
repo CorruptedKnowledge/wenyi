@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..errors import WenyiError
+from ..glossary.prompt_scope import prompt_terms
 from ..llm.json_parser import parse_json_result
 from . import prompts
 from .base import Agent
@@ -57,7 +58,12 @@ class Reviewer(Agent):
             src=self.src,
             tgt=self.tgt,
             glossary=prompts.render_glossary(
-                glossary_terms or [],
+                # A reviewed block needs the mappings its own source can use.
+                prompt_terms(
+                    glossary_terms or [],
+                    "\n".join(sources),
+                    budget=self.config.pipeline.glossary_prompt_tokens,
+                ),
                 source_lang=self.src,
                 genre=self.language_policy.context.genre,
                 note_source="\n".join(sources)

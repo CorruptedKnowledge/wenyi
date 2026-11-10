@@ -81,9 +81,15 @@ completed targets. Lookahead is a read-only source neighbor, excluded from numbe
 inputs and output count. BabelDOC role/section boundaries further restrict prose
 context without deleting non-prose translation units.
 
-The full glossary owns name mappings. It retains stable insertion order, and fresh
-Reviewer requests share one complete final snapshot. Selective evidence and Fixer
-requests may use relevant subsets. Japanese readings are source metadata supported
+The glossary owns name mappings and retains stable insertion order. Body, extraction,
+title and fresh Reviewer requests select from one snapshot through
+`glossary.prompt_scope.prompt_terms`: the whole glossary while it fits
+`pipeline.glossary_prompt_tokens`, otherwise its longest leading run within the budget
+plus later terms occurring in the request's source. The leading run is append-stable,
+so it must stay first for provider prefix caches. Review reuse binds the complete
+snapshot, and the budget as well once the glossary exceeds it. Selective evidence and
+Fixer requests use relevant subsets.
+Japanese readings are source metadata supported
 by explicit source evidence, not target-language transliterations; non-Japanese
 sources do not inject them through structured glossary rendering.
 
