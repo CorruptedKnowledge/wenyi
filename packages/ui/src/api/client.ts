@@ -162,6 +162,25 @@ export const api = {
       `/projects/${pid}/glossary/conflicts/${cid}/resolve`,
       { method: "POST", body: JSON.stringify(body) },
     ),
+  keepCurrentConflicts: (pid: string) =>
+    request<Output<"KeepCurrentResult">>(
+      `/projects/${pid}/glossary/conflicts/keep-current`,
+      { method: "POST" },
+    ),
+  matchingTermSources: (pid: string, params: { q?: string; type?: string }) => {
+    const s = new URLSearchParams();
+    if (params.q) s.set("q", params.q);
+    if (params.type) s.set("type", params.type);
+    return request<string[]>(`/projects/${pid}/glossary/sources?${s}`);
+  },
+  bulkDeleteTerms: (pid: string, sources: string[]) =>
+    request<Output<"BulkDeleteResult">>(`/projects/${pid}/glossary/bulk-delete`, {
+      method: "POST",
+      body: JSON.stringify({ sources }),
+    }),
+  // POST: reading every chapter can outlast the read deadline on a long book.
+  oneOffTerms: (pid: string) =>
+    request<Term[]>(`/projects/${pid}/glossary/one-off`, { method: "POST" }),
   exportGlossaryUrl: (pid: string, format: GlossaryExportFormat) =>
     `${apiBase()}/projects/${pid}/glossary/export?format=${format}`,
   importGlossary: (pid: string, terms: Partial<Term>[]) =>

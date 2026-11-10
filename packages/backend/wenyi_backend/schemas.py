@@ -195,6 +195,19 @@ class TermLookup(RequestModel):
     sources: list[str] = Field(max_length=500)
 
 
+class TermSources(RequestModel):
+    sources: list[str] = Field(max_length=100_000)
+
+
+class BulkDeleteResult(BaseModel):
+    deleted: int
+
+
+class KeepCurrentResult(BaseModel):
+    terms: int
+    conflicts: int
+
+
 class ConflictOut(BaseModel):
     id: int
     source: str

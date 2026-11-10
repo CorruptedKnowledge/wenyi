@@ -452,6 +452,7 @@ type SharedRenderSmoke = {
 const SHARED_RENDER_SMOKE: SharedRenderSmoke[] = [
   { module: "control-geometry", route: `/projects/${pid}/export`, role: "radio" },
   { module: "focus-style", route: `/projects/${pid}/proofreading/0`, slot: "page.header" },
+  { module: "glossary-cleanup", route: `/projects/${pid}/glossary`, role: "table" },
   { module: "glossary-pagination", route: `/projects/${pid}/glossary`, role: "table" },
   { module: "glossary-types", route: `/projects/${pid}/glossary`, role: "table" },
   { module: "overlay-notifications", route: `/projects/${pid}/glossary`, role: "table" },

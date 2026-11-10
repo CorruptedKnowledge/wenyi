@@ -65,6 +65,14 @@ Search covers the whole glossary, including aliases, readings, and notes. Type f
 
 A conflict means a later passage was translated differently from an existing term. The current translation stays in use until you choose one. A proposal that differs only in letter case, character width, spacing, or punctuation is not a conflict, and an alternative already recorded for a term is not recorded again, even after you have resolved it.
 
+To clean up a large glossary, pause the project first:
+
+- **Keep current for all** closes every open conflict and keeps each term's current translation. The dismissed alternatives are not raised again.
+- With a search or type filter applied, **Delete all matching** deletes every matching term on all pages, not only the visible one.
+- **Remove one-off terms** checks the whole book and lists the terms whose source occurs fewer than twice, which have nothing to keep consistent. Nothing is deleted until you confirm, and the list includes terms you added yourself. On a long book the check can take a minute.
+
+Deleting terms cannot be undone; export the glossary first if you may want them back. These actions change what later batches and Review receive, not translations that are already saved.
+
 Import **CSV or JSON**. CSV needs `source` and `target` headers. Import checks existing source terms across the complete glossary, not only the visible page or filter. Export CSV/JSON to reuse the glossary; type labels follow the interface language, while stored/exported built-in type IDs remain English.
 
 ### Anki export
