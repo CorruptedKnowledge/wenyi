@@ -57,6 +57,14 @@ class GlossaryExtractor(Agent):
         self._recurrence_matcher: GlossaryOccurrenceMatcher | None = None
         self._recurrence_cache: dict[tuple[str, str, tuple[str, ...]], bool] = {}
 
+    def _matcher(self, source_corpus: str) -> GlossaryOccurrenceMatcher:
+        """Return the occurrence matcher for this corpus, rebuilding it when the corpus changes."""
+        if source_corpus is not self._recurrence_corpus or self._recurrence_matcher is None:
+            self._recurrence_corpus = source_corpus
+            self._recurrence_matcher = GlossaryOccurrenceMatcher(source_corpus)
+            self._recurrence_cache.clear()
+        return self._recurrence_matcher
+
     def _recurring_existing_terms(
         self,
         terms: list[GlossaryTerm],
@@ -65,12 +73,7 @@ class GlossaryExtractor(Agent):
         """Return existing terms occurring at least twice in the book and cache per-term
         matches.
         """
-        if source_corpus is not self._recurrence_corpus:
-            self._recurrence_corpus = source_corpus
-            self._recurrence_matcher = GlossaryOccurrenceMatcher(source_corpus)
-            self._recurrence_cache.clear()
-
-        assert self._recurrence_matcher is not None
+        matcher = self._matcher(source_corpus)
         missing: list[GlossaryTerm] = []
         for term in terms:
             signature = (term.source, term.type, tuple(term.aliases))
@@ -80,7 +83,7 @@ class GlossaryExtractor(Agent):
         if missing:
             matched = {
                 (term.source, term.type, tuple(term.aliases))
-                for term in self._recurrence_matcher.recurring_terms(missing)
+                for term in matcher.recurring_terms(missing)
             }
             for term in missing:
                 signature = (term.source, term.type, tuple(term.aliases))
@@ -326,8 +329,9 @@ class GlossaryExtractor(Agent):
         position, align target against its first source/target pair. Defer uncertain
         mappings instead of locking a later candidate into the glossary and contaminating
         subsequent text.
-        With source_corpus, inject only existing terms occurring at least twice in the
-        source. Low-frequency terms remain stored but do not repeatedly consume extraction
+        With source_corpus, admit a new term only when its source or an allowed alias occurs
+        at least twice in the book, and inject only existing terms occurring at least twice in
+        the source. Low-frequency terms remain stored but do not repeatedly consume extraction
         context. Either way the injected terms follow the glossary prompt budget, so a long
         book does not resend every recurring term with every extraction.
         """
@@ -341,6 +345,17 @@ class GlossaryExtractor(Agent):
             existing, source_text, budget=self.config.pipeline.glossary_prompt_tokens
         )
         terms = self.extract(source_text, target_text, existing)
+        rare = 0
+        if source_corpus is not None:
+            # A new entry that occurs once in the whole book has nothing to keep consistent.
+            # Candidates for stored terms still pass, so changed translations become conflicts.
+            new = [term for term in terms if store.get_term(term.source) is None]
+            rejected = {id(term) for term in new} - {
+                id(term) for term in self._matcher(source_corpus).recurring_terms(new)
+            }
+            kept = [term for term in terms if id(term) not in rejected]
+            rare = len(terms) - len(kept)
+            terms = kept
         occurrences = (
             self._first_occurrences(terms, store, history, before) if before is not None else {}
         )
@@ -354,6 +369,7 @@ class GlossaryExtractor(Agent):
             "history_matched": len(occurrences),
             "history_aligned": aligned,
             "history_unresolved": unresolved,
+            "rare_skipped": rare,
         }
         for t in terms:
             evidence = occurrences.get(t.source)

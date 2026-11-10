@@ -223,6 +223,50 @@ class TestExtractor(unittest.TestCase):
         self.assertNotIn("唯一术语 → 唯一译法", prompts_seen[0])
         self.assertIn("重复术语 → 重复译法", prompts_seen[0])
 
+    def test_new_terms_must_recur_in_the_book(self):
+        terms = {
+            "terms": [
+                {"source": "一次性说法", "target": "one-off phrase", "type": "fixed_expression"},
+                {"source": "重复地名", "target": "Recurring Place", "type": "place"},
+                {"source": "全名", "target": "Full Name", "type": "person", "aliases": ["小名"]},
+                {"source": "旧词", "target": "new rendering", "type": "term"},
+            ]
+        }
+        client = FakeClient(handler=lambda m, t, j: json.dumps(terms, ensure_ascii=False))
+        extractor = GlossaryExtractor(client, _cfg())
+        with tempfile.TemporaryDirectory() as d:
+            store = GlossaryStore(os.path.join(d, "g.db"))
+            # A stored entry is never filtered, so a changed translation is still recorded.
+            store.upsert_term(GlossaryTerm(source="旧词", target="old rendering"))
+
+            summary = extractor.extract_and_store(
+                store,
+                "本批原文。",
+                "本批译文。",
+                chapter=3,
+                source_corpus="一次性说法。重复地名，又是重复地名。全名来了，小名走了。旧词。",
+            )
+
+            self.assertEqual(summary["rare_skipped"], 1)
+            self.assertEqual(summary["inserted"], 2)
+            self.assertEqual(summary["conflict"], 1)
+            self.assertIsNone(store.get_term("一次性说法"))
+            self.assertIsNotNone(store.get_term("重复地名"))
+            # Two mentions through an alias count for entity types.
+            self.assertIsNotNone(store.get_term("全名"))
+            self.assertEqual(len(store.open_conflicts()), 1)
+            store.close()
+
+    def test_without_a_corpus_every_candidate_is_admitted(self):
+        terms = {"terms": [{"source": "一次性说法", "target": "one-off", "type": "term"}]}
+        client = FakeClient(handler=lambda m, t, j: json.dumps(terms, ensure_ascii=False))
+        extractor = GlossaryExtractor(client, _cfg())
+        with tempfile.TemporaryDirectory() as d:
+            store = GlossaryStore(os.path.join(d, "g.db"))
+            summary = extractor.extract_and_store(store, "原文", "译文", chapter=0)
+            self.assertEqual((summary["inserted"], summary["rare_skipped"]), (1, 0))
+            store.close()
+
     def test_extract_and_store(self):
         terms = {
             "terms": [
