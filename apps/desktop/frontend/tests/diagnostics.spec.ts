@@ -134,6 +134,29 @@ async function failingRequest(page: Page, path: string, init: { method?: string;
   }, { path, init });
 }
 
+test("a name in the path is never recorded, even when it spells an API word", async ({ page }) => {
+  await setup(page);
+  await page.goto("/");
+  const shapes = await page.evaluate(async () => {
+    const modulePath = "/src/requestFailure.ts";
+    const { routeShape } = await import(modulePath);
+    return [
+      "/projects/p1/glossary/terms/page?q=fake-private-query",
+      "/projects/p1/glossary/terms/settings",
+      "/projects/p1/glossary/terms",
+      "/desktop/credentials/projects/secret",
+      "/projects/p1/review/runs",
+    ].map(routeShape);
+  });
+  expect(shapes).toEqual([
+    "/projects/:id/glossary/terms/:id",
+    "/projects/:id/glossary/terms/:id",
+    "/projects/:id/glossary/terms",
+    "/desktop/credentials/:id/secret",
+    "/projects/:id/review/runs",
+  ]);
+});
+
 test("a refused request reports its status, method and route shape, never its path or answer", async ({ page }) => {
   await setup(page);
   const requestId = "c".repeat(32);

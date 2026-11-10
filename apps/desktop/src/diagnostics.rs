@@ -222,12 +222,16 @@ static ROUTE_WORDS: LazyLock<Vec<String>> = LazyLock::new(|| {
 ///
 /// A path can carry a project identity or a glossary term, so the shape is checked
 /// word by word: no segment of free text can be recorded, whatever the renderer sends.
+/// Where the API takes a name (a glossary source after `terms`, a connection after
+/// `credentials`) only the placeholder is accepted, because a name can spell a word.
 fn route(value: &str) -> bool {
     value.strip_prefix('/').is_some_and(|path| {
-        path.split('/').count() <= 8
-            && path
-                .split('/')
-                .all(|segment| segment == ":id" || ROUTE_WORDS.iter().any(|word| word == segment))
+        let segments: Vec<&str> = path.split('/').collect();
+        segments.len() <= 8
+            && segments.iter().enumerate().all(|(index, segment)| {
+                let named = index > 0 && matches!(segments[index - 1], "terms" | "credentials");
+                *segment == ":id" || (!named && ROUTE_WORDS.iter().any(|word| word == segment))
+            })
     })
 }
 
@@ -1339,7 +1343,8 @@ mod tests {
     fn request_routes_admit_only_registered_words_and_placeholders() {
         for accepted in [
             "/projects",
-            "/projects/:id/glossary/terms/page",
+            "/projects/:id/glossary/terms",
+            "/projects/:id/glossary/terms/:id",
             "/projects/:id/chapters/:id/segments/:id/precision-drafts",
             "/desktop/credentials/:id/secret",
         ] {
@@ -1352,6 +1357,9 @@ mod tests {
             "/projects/",
             "/projects/a5793c34cc7442e8",
             "/projects/:id/glossary/terms/fake-private-term",
+            // A glossary source or a connection name may spell a registered word.
+            "/projects/:id/glossary/terms/page",
+            "/desktop/credentials/settings/secret",
             "/Projects",
             "/projects?q=fake-private",
             "/projects/:id/../settings",
@@ -1361,7 +1369,7 @@ mod tests {
         }
         let input = BTreeMap::from([
             ("method".to_string(), json!("GET")),
-            ("route".to_string(), json!("/projects/:id/glossary/terms/page")),
+            ("route".to_string(), json!("/projects/:id/glossary/terms/:id")),
         ]);
         assert_eq!(attributes(input.clone()), input);
         let unsafe_input = BTreeMap::from([

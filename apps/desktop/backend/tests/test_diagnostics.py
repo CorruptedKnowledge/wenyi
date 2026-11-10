@@ -59,6 +59,14 @@ def test_reported_route_words_match_the_local_api(desktop_context):
     assert max(map(len, segments)) <= 8
     used = {word for path in segments for word in path if not word.startswith("{")}
     assert set(words) == used
+    # Names are user text and may spell a word, so their positions are always placeholders.
+    named = {
+        path[index - 1]
+        for path in segments
+        for index, word in enumerate(path)
+        if word in {"{source}", "{connection}"}
+    }
+    assert named == {"terms", "credentials"}
 
 
 def test_only_safe_fields_reach_the_pipe():

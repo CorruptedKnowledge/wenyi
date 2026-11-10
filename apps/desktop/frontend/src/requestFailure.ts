@@ -13,17 +13,23 @@ export type RequestFailure = {
 };
 
 const WORDS = new Set<string>(routeWords);
+/** Words followed by user text: a glossary source or a connection name. */
+const NAMES_FOLLOW = new Set(["terms", "credentials"]);
 const IDENTITY = /^[0-9a-f]{32}$/;
 
 /** Reduce a request path to its route shape.
  *
  * A path carries project identities and can carry a glossary term, so every
  * segment that is not a registered API word becomes `:id`, and the query is
- * dropped. The native side checks the result against the same word list.
+ * dropped. A segment where user text can stand is always `:id`, even when it
+ * spells an API word: a term named "page" must not be recorded as `page`.
+ * The native side checks the result against the same rules.
  */
 export function routeShape(path: string): string {
   const segments = path.split(/[?#]/, 1)[0].split("/").filter(Boolean);
-  return `/${segments.map(segment => (WORDS.has(segment) ? segment : ":id")).join("/")}`;
+  const shape = segments.map((segment, index) =>
+    WORDS.has(segment) && !NAMES_FOLLOW.has(segments[index - 1]) ? segment : ":id");
+  return `/${shape.join("/")}`;
 }
 
 /** A deadline or a cancellation, whichever phase of the request it stopped. */

@@ -182,7 +182,7 @@ SQLite 锁、占位文件及分时复制的 WAL 可能破坏一致性。应用�
 ### 安全入口与关联身份
 
 [Python 投影器](../../../apps/desktop/backend/wenyi_desktop/diagnostics.py#L135)与
-[原生校验器](../../../apps/desktop/src/diagnostics.rs#L234)只接收已注册事件、安全枚举、
+[原生校验器](../../../apps/desktop/src/diagnostics.rs#L238)只接收已注册事件、安全枚举、
 有界数值和不透明身份。在入队之前处理，导出时再次校验；字段名在白名单中并不意味着
 任意文本都安全。
 
@@ -196,7 +196,8 @@ SQLite 锁、占位文件及分时复制的 WAL 可能破坏一致性。应用�
 提交的已注册事件名，不接受任意载荷或文件读取请求。只有失败的请求可以描述自身：
 失败类别、HTTP 状态码、方法、引擎的 request/error ID，以及由
 [已注册 API 路径词](../../../apps/desktop/diagnostic-routes.json#L1)构成的路由形状，
-其余路径段一律替换为 `:id`，查询串被丢弃。复用任务/run/模型调用身份，
+其余路径段一律替换为 `:id`，查询串被丢弃；承载名称（术语源词、连接名）的路径段
+即使拼写与 API 词相同也固定为 `:id`。复用任务/run/模型调用身份，
 显式向线程传播上下文，并在操作结束后复位。Desktop 自行生成 request/error ID，
 不持久化调用方提交的 request ID。导出对 session/project/run/call 引用使用包内别名。
 
