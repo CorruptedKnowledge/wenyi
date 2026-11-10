@@ -17,6 +17,7 @@ from ...llm.configuration import LLMConfig
 from ...llm.operations import OPERATIONS
 from ...llm.routing import inference_snapshot
 from ...models.document import Chapter
+from ...models.glossary import GlossaryTerm
 from ...storage.protocol import Storage
 from ..run.runtime_usage import UsageCoordinator
 
@@ -127,7 +128,8 @@ class BookUnderstandingService:
         analysis = store.load_analysis() or {}
         terms = sorted(store.all_terms(), key=lambda term: term.source)
         style = self._analyzer.style_brief(analysis, terms=terms)
-        inputs = {
+        inference = inference_snapshot(self._config.llm, ("synopsis.book",))
+        common = {
             "language_policy": self._config.language_policy("analysis").task_fingerprint(
                 "book_synopsis"
             ),
@@ -136,18 +138,21 @@ class BookUnderstandingService:
                 for chapter in loaded
                 if chapter.text_segments
             ],
-            "style": style,
             "source_lang": self._config.source_lang,
             "target_lang": self._config.target_lang,
-            "glossary": [
-                [term.source, term.target, term.type, term.gender, term.note] for term in terms
-            ],
         }
-        # Bind the synopsis to the route that writes it; unrelated model edits keep it valid.
+        # Translation keeps adding glossary terms, so binding the synopsis to the glossary (or
+        # to the person terms the style brief lists) would regenerate it on every resume and
+        # change the prompt prefix mid-book. Bind it to the style analysis without terms, the
+        # digests, the task policy and the synopsis.book route instead.
         metadata = {
-            "version": 2,
+            "version": 3,
             "inputs_sha256": _hash_inputs(
-                {**inputs, "inference": inference_snapshot(self._config.llm, ("synopsis.book",))}
+                {
+                    **common,
+                    "style": self._analyzer.style_brief(analysis, terms=[]),
+                    "inference": inference,
+                }
             ),
         }
         synopsis = analysis.get("book_synopsis", "")
@@ -155,12 +160,7 @@ class BookUnderstandingService:
             saved = analysis.get("book_synopsis_meta")
             if saved == metadata:
                 return synopsis
-            # Releases up to v1.5.1 hashed the whole LLM configuration; adopt and re-key a
-            # synopsis whose legacy identity still matches the synopsis.book route.
-            if any(
-                saved == {"version": 2, "inputs_sha256": _hash_inputs({**inputs, "routing": llm})}
-                for llm in _legacy_llm_documents(self._config.llm, "synopsis.book")
-            ):
+            if self._legacy_synopsis(saved, common, analysis, terms, inference):
                 analysis["book_synopsis_meta"] = metadata
                 store.save_analysis(analysis)
                 return synopsis
@@ -179,6 +179,42 @@ class BookUnderstandingService:
                 "The synopsis will be retried on the next prepare/translate run."
             )
         return synopsis
+
+    def _legacy_synopsis(
+        self,
+        saved: object,
+        common: dict[str, Any],
+        analysis: dict[str, Any],
+        terms: list[GlossaryTerm],
+        inference: object,
+    ) -> bool:
+        """Return whether ``saved`` is a version 2 identity that still describes this synopsis.
+
+        Version 2 also hashed the glossary of its time, which is not stored. Verify against
+        the current glossary and an empty one (a synopsis written before translation added any
+        term); anything else is regenerated once and then keyed without the glossary.
+        """
+        if not isinstance(saved, dict) or saved.get("version") != 2:
+            return False
+        # Releases up to v1.5.1 hashed the whole LLM configuration instead of the route.
+        routings = [{"inference": inference}] + [
+            {"routing": llm} for llm in _legacy_llm_documents(self._config.llm, "synopsis.book")
+        ]
+        for glossary in (terms, []):
+            inputs = {
+                **common,
+                "style": self._analyzer.style_brief(analysis, terms=glossary),
+                "glossary": [
+                    [term.source, term.target, term.type, term.gender, term.note]
+                    for term in glossary
+                ],
+            }
+            if any(
+                saved == {"version": 2, "inputs_sha256": _hash_inputs({**inputs, **routing})}
+                for routing in routings
+            ):
+                return True
+        return False
 
     def ensure_chapter_digests(
         self,

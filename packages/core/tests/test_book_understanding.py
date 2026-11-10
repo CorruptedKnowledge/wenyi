@@ -12,6 +12,7 @@ from wenyi_core.config import Config
 from wenyi_core.i18n.policy.models import PolicyPlan, content_hash
 from wenyi_core.llm.limits import RequestCancelled, RequestStopped
 from wenyi_core.llm.providers.fake import FakeClient
+from wenyi_core.llm.routing import inference_snapshot
 from wenyi_core.models.document import Chapter, Document, Segment
 from wenyi_core.models.glossary import GlossaryTerm
 from wenyi_core.pipeline.prepare.book_understanding import BookUnderstandingService
@@ -295,18 +296,44 @@ def test_synopsis_cache_tracks_the_model_configuration(tmp_path):
     runtime.synopsizer.book_synopsis.assert_called_once()
 
 
-def test_glossary_change_invalidates_synopsis_cache(tmp_path):
+def test_glossary_growth_keeps_the_synopsis_cache(tmp_path):
+    """Translation adds terms on every run; that must not repay the synopsis on resume."""
     service, store, runtime = _service(tmp_path)
     service.ensure_understanding(store)
     term = GlossaryTerm(source="Citadel", target="城堡", type="place", note="Location")
     store.upsert_term(term, chapter=0)
     runtime.synopsizer.reset_mock()
-    service.ensure_understanding(store)
+    assert service.ensure_understanding(store) == "Whole-book synopsis."
     runtime.synopsizer.digest_chapter.assert_not_called()
+    runtime.synopsizer.book_synopsis.assert_not_called()
+
+
+def test_generation_still_receives_the_current_glossary(tmp_path):
+    service, store, runtime = _service(tmp_path)
+    term = GlossaryTerm(source="Citadel", target="城堡", type="place", note="Location")
+    store.upsert_term(term, chapter=0)
+    service.ensure_understanding(store)
     runtime.synopsizer.book_synopsis.assert_called_once_with(
         ["Chapter digest.", "Chapter digest."], "Restrained.", glossary=store.all_terms()
     )
-    runtime.analyzer.style_brief.assert_called_with(store.load_analysis(), terms=store.all_terms())
+    runtime.analyzer.style_brief.assert_any_call(store.load_analysis(), terms=store.all_terms())
+
+
+def test_style_analysis_change_invalidates_synopsis_cache(tmp_path):
+    store = _digest_store(tmp_path)
+    config = _routed_config()
+    analyzer = Analyzer(FakeClient(), config)
+    client = FakeClient(handler=lambda messages, tier, json_mode: "Digest.", config=config.llm)
+    service = BookUnderstandingService(
+        config, Synopsizer(client, config), analyzer, Mock(spec=UsageCoordinator)
+    )
+    service.ensure_understanding(store)
+    analysis = store.load_analysis()
+    analysis["tone"] = "Bleak."
+    store.save_analysis(analysis)
+    client.calls.clear()
+    service.ensure_understanding(store)
+    assert [request["operation"] for request in client.calls] == ["synopsis.book"]
 
 
 @pytest.mark.parametrize("change", ["version", "source"])
@@ -377,7 +404,7 @@ def test_legacy_sampled_cache_is_rebuilt_without_touching_targets_or_terms(tmp_p
     )
     analysis = store.load_analysis()
     assert analysis is not None
-    assert analysis["book_synopsis_meta"]["version"] == 2
+    assert analysis["book_synopsis_meta"]["version"] == 3
     assert store.all_terms() == terms
     assert all(store.load_chapter(i).segments[0].target == "Saved target." for i in range(2))
 
@@ -565,7 +592,7 @@ def test_language_policy_change_still_invalidates(tmp_path, monkeypatch, prefix)
     assert sorted(_understand(store, _routed_config())) == expected
 
 
-def _legacy_state(store, config, *, chapter_meta=True, synopsis=True):
+def _legacy_state(store, config, *, chapter_meta=True, synopsis=True, glossary=()):
     """Write digests and a synopsis exactly as releases up to v1.5.1 keyed them."""
     llm = config.llm.model_dump(mode="json")
     policy = config.language_policy("analysis")
@@ -595,7 +622,7 @@ def _legacy_state(store, config, *, chapter_meta=True, synopsis=True):
             "style": "Restrained.",
             "source_lang": config.source_lang,
             "target_lang": config.target_lang,
-            "glossary": [],
+            "glossary": [[t.source, t.target, t.type, t.gender, t.note] for t in glossary],
             "routing": llm,
         }
         inputs_sha256 = hashlib.sha256(
@@ -663,3 +690,59 @@ def test_legacy_cache_is_not_reused_after_a_relevant_configuration_change(tmp_pa
     store = _digest_store(tmp_path)
     _legacy_state(store, _routed_config())
     assert sorted(_understand(store, _routed_config(**change))) == _FRESH
+
+
+def _place(source):
+    return GlossaryTerm(source=source, target=source.upper(), type="place", note="")
+
+
+def test_legacy_synopsis_migrates_after_translation_added_terms(tmp_path):
+    """A synopsis written before any term existed survives the glossary growing since."""
+    store = _digest_store(tmp_path)
+    _legacy_state(store, _routed_config())
+    store.upsert_term(_place("Citadel"), chapter=0)
+    assert _understand(store, _routed_config()) == []
+    store.upsert_term(_place("Harbor"), chapter=1)
+    assert _understand(store, _routed_config()) == []
+    assert store.load_analysis()["book_synopsis"] == "Legacy synopsis."
+
+
+def test_route_keyed_synopsis_with_current_glossary_migrates(tmp_path):
+    """Version 2 synopses keyed on the synopsis.book route and the glossary of their time."""
+    store = _digest_store(tmp_path)
+    config = _routed_config()
+    store.upsert_term(_place("Citadel"), chapter=0)
+    _understand(store, config)
+    analysis = store.load_analysis()
+    terms = store.all_terms()
+    inputs = {
+        "language_policy": config.language_policy("analysis").task_fingerprint("book_synopsis"),
+        "chapters": [[0, "Digest."], [1, "Digest."]],
+        "style": "Restrained.",
+        "source_lang": config.source_lang,
+        "target_lang": config.target_lang,
+        "glossary": [[t.source, t.target, t.type, t.gender, t.note] for t in terms],
+        "inference": inference_snapshot(config.llm, ("synopsis.book",)),
+    }
+    analysis["book_synopsis"] = "Route-keyed synopsis."
+    analysis["book_synopsis_meta"] = {
+        "version": 2,
+        "inputs_sha256": hashlib.sha256(
+            json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+    }
+    store.save_analysis(analysis)
+    assert _understand(store, config) == []
+    assert store.load_analysis()["book_synopsis_meta"]["version"] == 3
+    store.upsert_term(_place("Harbor"), chapter=1)
+    assert _understand(store, config) == []
+
+
+def test_unverifiable_legacy_synopsis_is_regenerated_once(tmp_path):
+    """The glossary a v2 synopsis hashed is not stored; an unmatched one is rebuilt once."""
+    store = _digest_store(tmp_path)
+    _legacy_state(store, _routed_config(), glossary=[_place("Citadel")])
+    store.upsert_term(_place("Harbor"), chapter=0)
+    assert _understand(store, _routed_config()) == ["synopsis.book"]
+    store.upsert_term(_place("Quay"), chapter=1)
+    assert _understand(store, _routed_config()) == []
