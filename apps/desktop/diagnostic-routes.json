@@ -1,0 +1,12 @@
+[
+  "admit", "analysis", "assemble", "babeldoc", "backup-plan", "cancel",
+  "cancel-update", "capabilities", "chapter-digests", "chapters", "check",
+  "check-update", "complete", "config", "conflicts", "content", "credentials",
+  "defaults", "desktop", "disable", "download", "enable", "events", "export",
+  "exports", "external-credentials", "glossary", "health", "history", "import",
+  "library", "list", "lookup", "metrics", "mineru", "models", "page", "pause", "ping",
+  "plan", "plugins", "precision-drafts", "prepare", "preview", "projects", "resolve",
+  "resume", "review", "run", "runs", "secret", "segments", "settings", "stats",
+  "steps", "strategies", "templates", "terms", "title", "translate", "update",
+  "updates", "upload", "validate", "workflow"
+]

@@ -84,10 +84,10 @@ export const webPlatform: PlatformServices = {
       return () => window.removeEventListener("storage", changed);
     },
   },
-  request: <T>(path: string, init?: RequestInit) =>
-    sendRequest(() => fetch(`/api${path}`, withTimeout({
-      ...init, headers: requestHeaders(init, authToken()),
-    }))),
+  request: <T>(path: string, init?: RequestInit) => {
+    const bounded = withTimeout({ ...init, headers: requestHeaders(init, authToken()) });
+    return sendRequest<T>(() => fetch(`/api${path}`, bounded), undefined, bounded.signal);
+  },
   download,
   apiBase: () => "/api",
   setAuthToken: (token) => {

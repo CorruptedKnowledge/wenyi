@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc, LazyLock, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -213,10 +213,37 @@ fn id() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Every static path word of the local API, shared with the renderer.
+static ROUTE_WORDS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../diagnostic-routes.json")).unwrap_or_default()
+});
+
+/// A request route built only from registered API words and `:id` placeholders.
+///
+/// A path can carry a project identity or a glossary term, so the shape is checked
+/// word by word: no segment of free text can be recorded, whatever the renderer sends.
+/// Where the API takes a name (a glossary source after `terms`, a connection after
+/// `credentials`) only the placeholder is accepted, because a name can spell a word.
+fn route(value: &str) -> bool {
+    value.strip_prefix('/').is_some_and(|path| {
+        let segments: Vec<&str> = path.split('/').collect();
+        segments.len() <= 8
+            && segments.iter().enumerate().all(|(index, segment)| {
+                let named = index > 0 && matches!(segments[index - 1], "terms" | "credentials");
+                *segment == ":id" || (!named && ROUTE_WORDS.iter().any(|word| word == segment))
+            })
+    })
+}
+
 fn attributes(input: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
     input
         .into_iter()
         .filter(|(key, value)| match key.as_str() {
+            "method" => matches!(
+                value.as_str(),
+                Some("GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE")
+            ),
+            "route" => value.as_str().is_some_and(route),
             "duration_ms" | "status_code" | "attempt" | "wait_ms" | "tokens" | "count" | "line" => {
                 value.as_u64().is_some_and(|n| n <= (1u64 << 53) - 1)
             }
@@ -1310,6 +1337,46 @@ mod tests {
         let text = serde_json::to_string(&memory).unwrap();
         assert!(!text.contains("fake-secret"));
         assert!(text.contains("429"));
+    }
+
+    #[test]
+    fn request_routes_admit_only_registered_words_and_placeholders() {
+        for accepted in [
+            "/projects",
+            "/projects/:id/glossary/terms",
+            "/projects/:id/glossary/terms/:id",
+            "/projects/:id/chapters/:id/segments/:id/precision-drafts",
+            "/desktop/credentials/:id/secret",
+        ] {
+            assert!(route(accepted), "{accepted}");
+        }
+        for rejected in [
+            "",
+            "/",
+            "projects",
+            "/projects/",
+            "/projects/a5793c34cc7442e8",
+            "/projects/:id/glossary/terms/fake-private-term",
+            // A glossary source or a connection name may spell a registered word.
+            "/projects/:id/glossary/terms/page",
+            "/desktop/credentials/settings/secret",
+            "/Projects",
+            "/projects?q=fake-private",
+            "/projects/:id/../settings",
+            "/projects/:id/chapters/:id/segments/:id/precision-drafts/:id/:id",
+        ] {
+            assert!(!route(rejected), "{rejected}");
+        }
+        let input = BTreeMap::from([
+            ("method".to_string(), json!("GET")),
+            ("route".to_string(), json!("/projects/:id/glossary/terms/:id")),
+        ]);
+        assert_eq!(attributes(input.clone()), input);
+        let unsafe_input = BTreeMap::from([
+            ("method".to_string(), json!("fake-private-verb")),
+            ("route".to_string(), json!("/home/fake-private-user/book.epub")),
+        ]);
+        assert!(attributes(unsafe_input).is_empty());
     }
 
     #[test]

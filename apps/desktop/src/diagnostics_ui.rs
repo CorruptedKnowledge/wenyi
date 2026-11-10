@@ -1,6 +1,7 @@
 //! Native diagnostic controls work without the loopback server or the React tree.
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -51,12 +52,38 @@ pub async fn desktop_diagnostics_status(
 pub fn desktop_diagnostics_record(
     window: tauri::WebviewWindow,
     event: Event,
+    attributes: Option<BTreeMap<String, Value>>,
 ) -> Result<Option<String>, crate::ipc_error::IpcError> {
     trusted(&window)?;
-    // Renderer supplies only an enum, never arbitrary strings, frames or attributes.
-    Ok(window
-        .state::<Diagnostics>()
-        .record(Source::Frontend, event, json!({})))
+    Ok(window.state::<Diagnostics>().record(
+        Source::Frontend,
+        event,
+        Value::Object(request_failure(event, attributes)),
+    ))
+}
+
+/// Keep what the renderer may say about an event: nothing, except how a request failed.
+///
+/// Every other frontend event stays a bare name. A failed request may add its class,
+/// status, method, route shape and the engine's identities; the recorder still bounds
+/// each value, so none of them can hold a path, a message or other free text.
+fn request_failure(
+    event: Event,
+    attributes: Option<BTreeMap<String, Value>>,
+) -> Map<String, Value> {
+    if event != Event::FrontendRequestFailed {
+        return Map::new();
+    }
+    attributes
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(key, _)| {
+            matches!(
+                key.as_str(),
+                "category" | "status_code" | "method" | "route" | "request_id" | "error_id"
+            )
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -239,5 +266,28 @@ pub fn startup_failure(diagnostics: &Diagnostics) {
                 .set_description("Could not save the diagnostic report. Check destination permissions and free space.")
                 .set_level(rfd::MessageLevel::Error).show();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_failed_request_may_describe_itself() {
+        let sent = BTreeMap::from([
+            ("category".to_string(), json!("timeout")),
+            ("method".to_string(), json!("GET")),
+            ("route".to_string(), json!("/projects/:id/stats")),
+            ("message".to_string(), json!("fake-private-text")),
+            ("duration_ms".to_string(), json!(30000)),
+        ]);
+        let kept = request_failure(Event::FrontendRequestFailed, Some(sent.clone()));
+        assert_eq!(
+            Value::Object(kept),
+            json!({"category": "timeout", "method": "GET", "route": "/projects/:id/stats"})
+        );
+        assert!(request_failure(Event::FrontendError, Some(sent)).is_empty());
+        assert!(request_failure(Event::FrontendRequestFailed, None).is_empty());
     }
 }

@@ -221,7 +221,7 @@ Review artifacts or accounting. No report is uploaded automatically.
 ### Safe ingestion and correlation
 
 The [Python projector](../../apps/desktop/backend/wenyi_desktop/diagnostics.py#L135)
-and [native validator](../../apps/desktop/src/diagnostics.rs#L216) accept only
+and [native validator](../../apps/desktop/src/diagnostics.rs#L238) accept only
 registered events, safe enums, bounded numeric fields and opaque identities.
 Sanitize before queueing and validate again during export. An allowlisted field
 name does not make arbitrary text safe.
@@ -237,6 +237,11 @@ The native process is the **single file writer**. Python sends bounded
 `WENYI_DIAGNOSTIC` frames through the private pipe; `WENYI_READY` stays a separate
 protocol frame and arbitrary stderr is discarded. Frontend IPC accepts registered
 event names from the trusted window, not arbitrary payloads or file-read requests.
+Only a failed request describes itself: failure class, HTTP status, method, the
+engine's request/error IDs and a route shape built from the
+[registered API path words](../../apps/desktop/diagnostic-routes.json#L1), with every
+other segment replaced by `:id` and the query dropped. A segment that holds a name
+(a glossary source, a connection) is always `:id`, even when it spells an API word.
 Reuse task/run/model-call identities, explicitly propagate context into threads and
 reset it after each operation. Desktop generates request/error IDs; caller-supplied
 request IDs are not persisted. Export aliases session/project/run/call references.
@@ -279,7 +284,7 @@ The record-selection budget is 20 MiB and final ZIP cap is 25 MiB. A `complete`
 manifest means no known collection loss from available sources, not full historical
 coverage or a proven root cause.
 
-The [native diagnostic controls](../../apps/desktop/src/diagnostics_ui.rs#L152)
+The [native diagnostic controls](../../apps/desktop/src/diagnostics_ui.rs#L179)
 must remain usable without the Python engine or React tree. Export and clear exclude
 one another while logging can continue. A completely unlaunchable native executable
 cannot export itself.
