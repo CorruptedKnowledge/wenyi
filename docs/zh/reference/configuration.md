@@ -372,6 +372,7 @@ CLI 只覆盖其参数明确支持的设置；Web/Desktop 项目限制见[作用
 | `pipeline.polish` | `true` | 润色已译批次，增加较多模型工作。 |
 | `pipeline.align_retry_limit` | `2` | 额外结构输出尝试次数；`0` 关闭。 |
 | `pipeline.rolling_context_tokens` | `512` | 前文译文预算，整数 ≥ 0，按 `cl100k_base` 计数。 |
+| `pipeline.glossary_prompt_tokens` | `4000` | 单次请求的术语预算，整数 ≥ 0，按 `cl100k_base` 估算。术语库超出预算时，发送预算内最早加入的词条，以及其后出现在本次请求原文中的词条；`0` 只发送出现的词条。 |
 | `pipeline.book_understanding` | `true` | 生成覆盖完整原文的章节梗概和全书概览。 |
 | `pipeline.prescan_concurrency` | `4` | 章节梗概并发；`1` 为顺序执行。 |
 | `pipeline.terminology_context` | `false` | 仅 CLI 可用的实验性全书人物证据。 |
@@ -403,7 +404,8 @@ CLI 只覆盖其参数明确支持的设置；Web/Desktop 项目限制见[作用
 Web/API 不会仅因该 YAML 开关启用而生产证据。
 Review 可以使用已有备注，不生成新证据。
 
-正文翻译和新的 Reviewer 请求总是使用全量术语，没有范围选择器。
+正文翻译、术语抽取、标题翻译和新的 Reviewer 请求共用术语预算，
+[词条的选择方式](../guide/pipeline.md#context-and-glossary)见流程指南。
 注释定位可能增加模型请求，定位失败的处理取决于[格式](formats.md)。
 完整流程、成本和续跑语义见[流程指南](../guide/pipeline.md)，
 标记／排版限制见[格式参考](formats.md)。

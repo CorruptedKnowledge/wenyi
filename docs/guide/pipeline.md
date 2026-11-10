@@ -75,7 +75,7 @@ An unfinished chapter's individual prescan chunks are not separately checkpointe
 ## Translation context and the glossary
 
 Chapters and body batches progress in source order. A normal batch receives style
-guidance, the book synopsis, its chapter digest, the **full current glossary**,
+guidance, the book synopsis, its chapter digest, the **current glossary**,
 relevant source notes, recent translated text, the requested source, and one following
 source segment as a read-only reference. The following segment helps with continuity;
 it is not translated early or included in the expected output count.
@@ -93,10 +93,17 @@ New terms and conflicts inform later batches; they do not automatically rewrite
 earlier translations. The glossary is authoritative for name mappings, while style
 guidance retains source identities and descriptive character information.
 
-Each pending body batch receives all current mappings, including terms absent from
-its chapter. Fresh Reviewer requests receive the complete final glossary.
-This favors book-wide consistency at the cost of larger prompts. Evidence queries
-and individual Fixers can use relevant subsets.
+A glossary that fits `pipeline.glossary_prompt_tokens` (4,000 tokens by default) is
+sent whole with every pending body batch, extraction and fresh Reviewer request,
+including terms absent from the text. A larger glossary sends its **earliest entries
+within the budget**, then only the later entries whose source or alias **occurs in
+that request's source text**. Requests therefore stop growing with the book, and the
+unchanging leading entries keep provider prompt caches effective.
+
+The trade-off is that matching is literal. A later entry that appears only as an
+inflected or shortened form is not sent with that request; add the form as an alias,
+or raise the budget, when a book depends on such forms. Evidence queries and
+individual Fixers use relevant subsets regardless of the budget.
 
 ### Optional whole-book terminology evidence
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from ...agents import prompts
 from ...agents.title_translator import TitleOutputError, TitleTranslator
+from ...glossary.prompt_scope import prompt_terms
 from ...glossary.store import GlossaryStore
 from ...models.document import Chapter
 from ...storage.protocol import Storage
@@ -200,11 +201,17 @@ class TitleTranslationService:
 
         batches = title_batches(plan.pending)
         completed = 0
-        glossary_text = prompts.render_glossary(
-            glossary.all_terms(), source_lang=self._translator.src
-        )
+        terms = glossary.all_terms()
         for batch_index, batch in enumerate(batches):
             titles = [item.source for item in batch]
+            glossary_text = prompts.render_glossary(
+                prompt_terms(
+                    terms,
+                    "\n".join(titles),
+                    budget=self._translator.config.pipeline.glossary_prompt_tokens,
+                ),
+                source_lang=self._translator.src,
+            )
             try:
                 translated = self._translator.translate(titles, glossary_text)
             except TitleOutputError as error:

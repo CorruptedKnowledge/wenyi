@@ -141,10 +141,14 @@ def source_matches_text(source: str, text: str) -> bool:
     for ASCII, Latin, Greek and Cyrillic to avoid matching Ann inside Anna or a short
     Cyrillic word inside a longer one.
     """
+    return _source_in_normalized(source, _match_text(text))
+
+
+def _source_in_normalized(source: str, normalized_text: str) -> bool:
+    """Match one source against text that `_match_text` has already normalized."""
     key = _match_text(source).strip()
     if not key:
         return False
-    normalized_text = _match_text(text)
     if pattern := _source_pattern(key):
         return pattern.search(normalized_text) is not None
     return key in normalized_text
@@ -441,12 +445,14 @@ class GlossaryStore:
         Match evidence and local revision context without querying the database per term.
         """
         out: list[GlossaryTerm] = []
-        normalized_text = _match_text(text)
+        # Normalize the text once, not once per key: a long book checks thousands of terms
+        # against every request. The second pass keeps what each key used to see.
+        normalized_text = _match_text(_match_text(text))
         for term in terms:
             # Forms of address, verbal habits and fixed expressions carry tone or context. A bare-name alias
             # must not inject their derived translation into an ordinary address.
             keys = term_match_sources(term)
-            if any(source_matches_text(k, normalized_text) for k in keys):
+            if any(_source_in_normalized(k, normalized_text) for k in keys):
                 out.append(term)
         return out
 

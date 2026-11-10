@@ -393,6 +393,7 @@ described under [scope](#scope).
 | `pipeline.polish` | `true` | Polish translated batches; adds substantial model work. |
 | `pipeline.align_retry_limit` | `2` | Additional structural-output attempts; `0` disables them. |
 | `pipeline.rolling_context_tokens` | `512` | Preceding translation budget, integer ≥ 0, counted with `cl100k_base`. |
+| `pipeline.glossary_prompt_tokens` | `4000` | Glossary budget per request, integer ≥ 0, estimated with `cl100k_base`. A larger glossary sends its earliest entries within the budget plus later entries occurring in the request's source; `0` sends only occurring entries. |
 | `pipeline.book_understanding` | `true` | Generate full-source chapter digests and a book synopsis. |
 | `pipeline.prescan_concurrency` | `4` | Chapter-digest concurrency; use `1` for sequential work. |
 | `pipeline.terminology_context` | `false` | CLI-only experimental whole-book evidence for person entries. |
@@ -428,8 +429,9 @@ It does not create multiple senses or per-occurrence target choices.
 Web/API do not produce this evidence merely because the YAML flag is set.
 Review can consume existing notes without producing new evidence.
 
-Body translation and fresh Reviewer requests always receive the full glossary;
-there is no scope selector. Annotation alignment may add model requests;
+Body translation, glossary extraction, title translation and fresh Reviewer requests
+share the glossary budget; [how entries are chosen](../guide/pipeline.md#context-and-glossary)
+is described in the workflow guide. Annotation alignment may add model requests;
 placement-failure behavior depends on the [format](formats.md). Full workflow, cost, and resume
 semantics belong in the [workflow guide](../guide/pipeline.md); markup/layout
 limitations belong in [formats](formats.md).

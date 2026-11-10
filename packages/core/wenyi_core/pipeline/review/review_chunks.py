@@ -71,8 +71,9 @@ class ReviewChunkService:
         """Review contiguous chapter blocks in parallel and return chapter-local issue indices.
         Use blocks around three translation batches to reduce calls and repeated context.
         Convert valid block-local indices by the block offset and reject invalid positions.
-        Supply the full glossary to every fresh reviewer request and share the same
-        snapshot across workers. Completed chunks and initial traces bypass model calls.
+        Share one glossary snapshot across workers; each fresh reviewer request selects
+        from it within the glossary prompt budget. Completed chunks and initial traces
+        bypass model calls.
         Read fixed target/glossary snapshots. Recursively bisect malformed output and retry
         single paragraphs a bounded number of times. Merge results in original block order
         for determinism.

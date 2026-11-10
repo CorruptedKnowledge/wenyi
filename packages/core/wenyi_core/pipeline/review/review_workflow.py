@@ -16,6 +16,7 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from ...events import ProgressFn
+from ...glossary.prompt_scope import prompt_terms
 from ...llm.retrying import is_resumable_provider_interrupt
 from ...models.glossary import GlossaryTerm
 from ...review.evidence import BookEvidenceIndex
@@ -48,16 +49,20 @@ class ReviewService:
         """Return the final glossary snapshot used by this review."""
         return store.all_terms()
 
-    def _review_config_snapshot(self) -> dict[str, Any]:
+    def _review_config_snapshot(self, terms: list[GlossaryTerm]) -> dict[str, Any]:
         """Snapshot review configuration for persisted metadata and reuse checks."""
         from ...llm.operations import configured_operations
         from ...llm.routing import inference_snapshot
 
+        # A glossary within the budget reaches every reviewer whole, as it always has. A
+        # larger one is selected per request, so results depend on the budget as well.
+        budget = self._runtime.config.pipeline.glossary_prompt_tokens
+        whole = len(prompt_terms(terms, "", budget=budget)) == len(terms)
         return {
             "source_lang": self._runtime.config.source_lang,
             "target_lang": self._runtime.config.target_lang,
             "language_policy": self._runtime.config.language_policy("review").fingerprint,
-            "review_glossary_policy": "full",
+            "review_glossary_policy": "full" if whole else {"prompt_tokens": budget},
             "review_glossary_reading_source": "ja",
             "review_output_retries": self._runtime.config.pipeline.review_output_retries,
             "review_agent_loop": self._runtime.config.pipeline.review_agent_loop,
@@ -150,7 +155,7 @@ class ReviewService:
             progress(0, 0, "Restoring review checkpoint…")
         analysis = store.load_analysis() or {}
         reviewed_content_digest = content_digest(loaded)
-        config_snapshot = self._review_config_snapshot()
+        config_snapshot = self._review_config_snapshot(all_terms)
         # Bind the whole run (including round-scoped fixer traces) to effective guidance.
         config_snapshot["guidance"] = {
             "style": self._runtime.analyzer.style_brief(analysis),

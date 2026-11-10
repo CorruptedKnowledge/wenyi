@@ -141,7 +141,7 @@ def test_fixer_protocol_revisions_invalidate_old_autofix_plans(tmp_path, monkeyp
 
 def test_review_fingerprint_only_tracks_reachable_inference(tmp_path):
     config = _config(tmp_path)
-    first = ReviewService(PipelineRuntime(config, FakeClient()))._review_config_snapshot()
+    first = ReviewService(PipelineRuntime(config, FakeClient()))._review_config_snapshot([])
     changed = config.model_copy(deep=True)
     raw = changed.llm.model_dump()
     raw["models"]["alternate"] = {"provider": "default", "model": "alternate"}
@@ -149,11 +149,13 @@ def test_review_fingerprint_only_tracks_reachable_inference(tmp_path):
     raw["routes"]["review.verify"] = {"model": "alternate"}  # Disabled by review_agent_loop.
     changed.llm = LLMConfig.model_validate(raw)
     changed.pipeline.review_concurrency = 1
-    same = ReviewService(PipelineRuntime(changed, FakeClient()))._review_config_snapshot()
+    same = ReviewService(PipelineRuntime(changed, FakeClient()))._review_config_snapshot([])
     assert same == first
     raw["routes"]["review.scan"] = {"model": "alternate"}
     changed.llm = LLMConfig.model_validate(raw)
-    assert ReviewService(PipelineRuntime(changed, FakeClient()))._review_config_snapshot() != first
+    assert (
+        ReviewService(PipelineRuntime(changed, FakeClient()))._review_config_snapshot([]) != first
+    )
 
 
 @pytest.mark.parametrize(
@@ -301,6 +303,27 @@ def test_full_glossary_changes_invalidate_completed_and_interrupted_reviews(
             assert "Another absent spelling" in prompt
         if change == "insert":
             assert "Another unused term → 新增术语" in prompt
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_a_budgeted_glossary_binds_review_reuse_to_its_budget(tmp_path, interrupted):
+    """Results reviewed with the whole glossary are not reused once requests are budgeted."""
+    source, config, store, _term, review_id = _review_with_absent_term(tmp_path, interrupted)
+    config.pipeline.glossary_prompt_tokens = 0
+    client = FakeClient(handler=routing_handler)
+    budgeted = Orchestrator(config, client).run_review(str(source))["review_result"]
+    assert budgeted["review_id"] != review_id
+    assert [call["operation"] for call in client.calls] == ["review.scan", "review.scan"]
+    for call in client.calls:
+        assert "Unused →" not in call["messages"][-1]["content"]
+    metadata = store.read_artifact(f"reviews/{budgeted['review_id']}/rounds/metadata.json")
+    assert isinstance(metadata, dict)
+    assert metadata["config"]["review_glossary_policy"] == {"prompt_tokens": 0}
+
+    cached_client = FakeClient(handler=routing_handler)
+    cached = Orchestrator(config, cached_client).run_review(str(source))["review_result"]
+    assert cached["review_id"] == budgeted["review_id"]
+    assert cached_client.calls == []
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
