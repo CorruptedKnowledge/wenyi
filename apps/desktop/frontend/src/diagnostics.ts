@@ -1,6 +1,11 @@
 import { asIpcError } from "./ipcError";
+import type { RequestFailure } from "./requestFailure";
 
-/** Native diagnostics accept event names, never errors, request objects or user text. */
+/** Native diagnostics accept event names, never errors, request objects or user text.
+ *
+ * A failed request is the one event that may describe itself, and only through
+ * the classifications in `RequestFailure`, which the native side validates again.
+ */
 export type DiagnosticEvent =
   | "frontend_ready" | "frontend_error" | "frontend_rejection"
   | "frontend_render_failed" | "frontend_request_failed"
@@ -32,12 +37,15 @@ export async function diagnosticCommand<T>(action: string, args: Record<string, 
 }
 
 const recent = new Map<DiagnosticEvent, number>();
-export function reportDiagnostic(event: DiagnosticEvent) {
+export function reportDiagnostic(event: "frontend_request_failed", failure: RequestFailure): void;
+export function reportDiagnostic(event: Exclude<DiagnosticEvent, "frontend_request_failed">): void;
+export function reportDiagnostic(event: DiagnosticEvent, failure?: RequestFailure) {
   const now = performance.now();
   if (now - (recent.get(event) ?? -Infinity) < 1000) return;
   recent.set(event, now);
   // Failure of the diagnostic transport must not recursively report itself.
-  void diagnosticCommand("record", { event }).catch(() => {});
+  void diagnosticCommand("record", failure ? { event, attributes: failure } : { event })
+    .catch(() => {});
 }
 
 export function installDiagnostics() {

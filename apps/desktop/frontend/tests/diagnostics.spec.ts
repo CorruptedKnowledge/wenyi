@@ -114,6 +114,75 @@ test("frontend diagnostics never forward exception messages or objects", async (
   expect(JSON.stringify(calls)).not.toContain("fake-private");
 });
 
+type RecordCall = { command: string; args: { event: string; attributes?: Record<string, unknown> } };
+
+async function failedRequests(page: Page) {
+  return page.evaluate(() => (window as unknown as { diagnosticCalls: RecordCall[] })
+    .diagnosticCalls.filter(call => call.args?.event === "frontend_request_failed"));
+}
+
+/** Send one request through the Desktop transport and wait for it to fail. */
+async function failingRequest(page: Page, path: string, init: { method?: string; abort?: boolean } = {}) {
+  await page.evaluate(async ({ path, init }) => {
+    const modulePath = "/src/transport.ts";
+    const { request } = await import(modulePath);
+    const signal = init.abort ? AbortSignal.abort() : undefined;
+    await request(path, { method: init.method, signal }).then(
+      () => { throw new Error("the request was expected to fail"); },
+      () => undefined,
+    );
+  }, { path, init });
+}
+
+test("a refused request reports its status, method and route shape, never its path or answer", async ({ page }) => {
+  await setup(page);
+  const requestId = "c".repeat(32);
+  await page.route(url => url.pathname.startsWith("/projects/fake-private-project/"), route => route.fulfill({
+    status: 409,
+    headers: {
+      "Access-Control-Expose-Headers": "X-Request-ID, X-Error-ID",
+      "X-Request-ID": requestId,
+      "X-Error-ID": "fake-private-not-an-identity",
+    },
+    json: { detail: "fake-private-detail", code: "project_busy" },
+  }));
+  await page.goto("/");
+  await failingRequest(page, "/projects/fake-private-project/glossary/terms/fake-private-term?q=fake-private-query", { method: "delete" });
+  const calls = await failedRequests(page);
+  expect(calls).toEqual([{
+    command: "desktop_diagnostics_record",
+    args: {
+      event: "frontend_request_failed",
+      attributes: {
+        method: "DELETE", route: "/projects/:id/glossary/terms/:id", status_code: 409, request_id: requestId,
+      },
+    },
+  }]);
+  expect(JSON.stringify(calls)).not.toContain("fake-private");
+});
+
+for (const [name, category, init, answer] of [
+  ["an unreachable engine", "io", {}, "abort"],
+  ["a caller that cancelled", "interrupted", { abort: true }, "abort"],
+  ["an unreadable answer", "invalid", {}, "garbled"],
+] as const) {
+  test(`a request failing through ${name} is recorded as ${category}`, async ({ page }) => {
+    await setup(page);
+    await page.route(url => url.pathname === "/projects/p1/stats", route => answer === "abort"
+      ? route.abort()
+      : route.fulfill({ status: 200, contentType: "application/json", body: "fake-private-not-json" }));
+    await page.goto("/");
+    await failingRequest(page, "/projects/p1/stats", init);
+    expect(await failedRequests(page)).toEqual([{
+      command: "desktop_diagnostics_record",
+      args: {
+        event: "frontend_request_failed",
+        attributes: { method: "GET", route: "/projects/:id/stats", category },
+      },
+    }]);
+  });
+}
+
 test("canceling the native picker reports neither a saved file nor an error", async ({ page }) => {
   await setup(page, true);
   await page.addInitScript(() => {

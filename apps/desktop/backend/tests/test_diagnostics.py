@@ -30,6 +30,37 @@ def test_shared_native_and_engine_privacy_fixtures():
         assert project_attributes(case["input"]) == case["expected"]
 
 
+def _paths(routes, prefix=""):
+    """Yield every route path, including routers hidden from the OpenAPI schema."""
+    for route in routes:
+        included = getattr(route, "original_router", None)
+        if included is not None:
+            yield from _paths(included.routes, prefix + route.include_context.prefix)
+        elif isinstance(getattr(route, "path", None), str):
+            yield prefix + route.path
+
+
+def test_reported_route_words_match_the_local_api(desktop_context):
+    """A failed request names its route from this list; a missing word loses the route."""
+    from wenyi_desktop import main
+
+    words = json.loads((Path(__file__).parents[2] / "diagnostic-routes.json").read_text())
+    assert words == sorted(set(words))
+    app = main.create_app(context=desktop_context)
+    paths = set(_paths(app.routes))
+    # Guard the walk itself: it must see at least everything the schema documents.
+    assert set(app.openapi()["paths"]) <= paths
+    # Interactive documentation and the progress socket are never fetched by the client.
+    requested = {
+        path for path in paths if not path.startswith(("/docs", "/redoc", "/openapi.json", "/ws/"))
+    }
+    assert len(requested) > 60
+    segments = [path.strip("/").split("/") for path in requested]
+    assert max(map(len, segments)) <= 8
+    used = {word for path in segments for word in path if not word.startswith("{")}
+    assert set(words) == used
+
+
 def test_only_safe_fields_reach_the_pipe():
     stream = io.StringIO()
     reporter = Reporter(stream)
