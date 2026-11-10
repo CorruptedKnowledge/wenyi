@@ -6,7 +6,7 @@
     "book_synopsis_user": "a98e6c041848bf6d62e13ea4c4accf5b15e0ecd317e1ecc8660bc247e20e9563",
     "chapter_digest_system": "bbf4b562238bee78ace2e93296b65f54babff5bea0bd4dfa15aede38315a7ed9",
     "chapter_digest_user": "37e13d04f0a29c0226f766e6bbf63325b3cd2a0e8ed35a911ffed227c620f13d",
-    "glossary_extractor_system": "b29e87059fec489a8c42262f4855ca239dad693b14d0348bf47c58a4b154f93f",
+    "glossary_extractor_system": "a49338e0a95d199ba2c320cb4f4886c34bb56bc98c0f239c6bc267fdb77dc4be",
     "glossary_extractor_user": "c1e634c7492d1bb22e783d54f11b29553aa699ac44a812659192619524a9846a",
     "glossary_history_system": "512961e2fec727899fc50fe3062c1417d8a1748f3d62f398fab7384a826ddea3",
     "glossary_history_user": "fd7a58d0f334fd93c3d023ecc48a27e882674ad376faf28a2c5bb89b97542611",
@@ -57,52 +57,52 @@
     "pt-PT": "4cc33deb3b9baf3c9431cd89e52d64ef86861bc124c7958ff43384b4252f8e3a"
   },
   "rendered": {
-    "zh": "2034030cc15b3e8c0ac736ac810d5895f03a13b002b26c1391061b94d2bfe178",
-    "en": "9e4533913351bd438ccf7a3807e55acf79ff6c7a627271468a39d9de75673c41",
-    "ja": "8bf92cb05eb4879b1aa3e69417988fe4f3872c16f4f2a05babb08f1d3e354b75",
-    "ko": "0af4ba8faa174ecc64bcbd682db68790f03fa60d642640a5418ded1b4f895472",
-    "fr": "292e8ea1bfab221d23e200d83ee9513151258d746be09488ec6b34a85bc22578",
-    "de": "bdba5be3aba5403c2c438d21cf63618c3a3b5bd3287efd55eefe963ba60f33e3",
-    "es": "d8c5216daa109b8ebc75a33128d16cb432f27c44b6507a143c57401ee656439d",
-    "it": "b61fe8bb6a1219ce2cde868f0329e2dc80f67a80d39afd266a8b1e7b0f1c5b4c",
-    "pt": "25e1e037e41d0da7c1f2fa029e9db331d3e564545f79cdefe27a7db1556ac347",
-    "ru": "73dbcb976986aaeb913c6fa7de949a5b7f6f76c9c10e67d74bf389be1d6613dd",
-    "vi": "3182a86384ea30235c63ca590d9bc8da1ffcbdf593f4bbf7e45c98a901438a2e",
-    "zh-Hant": "e34a87d1b10ae1ebbe47451b3ba50f2b99534a1a1163b26e3bcfb95af0fbbc8e",
-    "en-US": "b794ccc83bcd5403b079d1729b44adb912c587f3d39161d831d2c20063b78958",
-    "en-GB": "3ad5c9ffe28090319b458908c630f0b3e91e72d933ed33dc06f2ec0afff1735d",
-    "pt-BR": "30535bae7fdb5e8a0736752e3b8c88cb834087d81e15623f2f7014d1832d5e58",
-    "pt-PT": "14c134d500b8f52811ceeb4b1c1b1d1687371e62707b5913f894dfe99110a32f"
+    "zh": "208acad5d0d2849696a7768ab05024e75f7521046349568aee050123aa1fff77",
+    "en": "9373540c3351bfdbee3a6990d4d3ec9ce09be9d934643ca1150e1b236661039d",
+    "ja": "6e580759436e99cddc6f2086ef8493205b66afd5f72320bc48b58160ba25bcd1",
+    "ko": "86e3cdbf5a72ccfa8afc9af6e912431e4e08e6929507cf74d570f895dbf44b0f",
+    "fr": "d3aee7f991e06543a2c18419f1f7ecd034676bc3a6aefbaffdf7021c1d226a29",
+    "de": "4457156a011a74d5eb18831309a41a1b6fca2c0c829c0eaf0bd5217d626f061f",
+    "es": "5a329e3b7fdc9a7667e6715f951e61e786d208d479b6e2ebf62bd56e5ae78cf9",
+    "it": "4ac64b22e78fad6a66cbca97e3a0c25474d25627ab53adb9f5559ce7226ae983",
+    "pt": "e0dd2cddeb6857c502c2cd7944b752b13dffed203391934e322be18d8329b066",
+    "ru": "ca7b5c2d219a3d44cac1f94faa97c63edb5d4201aec58eb33c121c10014fec8c",
+    "vi": "5beee84310b9619f6515fbc2ef5b9075ae50414ce6b77430fbd9a671c80b736b",
+    "zh-Hant": "191a49b88a70deb45a43c7c3d80942edd65600278ea8f4adb14e3c73042e2bda",
+    "en-US": "414e881f4d413d8a4c05f1fdf356d7a80fd5108ea62ae2bbe7a752ca34b209a1",
+    "en-GB": "9ceda6722fb09cf05c32a8f7a626150423b8e20063225bb53747691656396b07",
+    "pt-BR": "7a6486944e1d12ccc0d62e62fc03632c90dcf024fc804e6fdca51921c9df32ba",
+    "pt-PT": "d105b5800431a5174cc648efb198dd86c036bc74ea8a3720cb05e99bb143318c"
   },
   "plans": {
     "standard": {
       "analysis": "f7e33dfe9db15a2ea06491cf232ff14aac08a11652093736211b79fa61a4942e",
-      "translation": "27eb7ba6d5b3ab7bcd5577233c8d3b8c2c3971feff24e618d86d9c641cfc5c8c",
+      "translation": "cbb1c3881066e0396c87bf554d7038b93bb334e4a506d72a4f04b4e78f322942",
       "review": "67b4e05448bd0828969a04193951a8f8ea01ef4ba2068537800ad20930c1dc45"
     },
     "three_draft_synthesis": {
       "analysis": "f7e33dfe9db15a2ea06491cf232ff14aac08a11652093736211b79fa61a4942e",
-      "translation": "5bd371b5273a741e84f65f8ba3156075853f3ba495ebc2607f7f0adb24ffdfc0",
+      "translation": "47f3e1de9f16deb0695ea9d2d09553b3276fcf37df76787ebf7fd55de1746ba6",
       "review": "67b4e05448bd0828969a04193951a8f8ea01ef4ba2068537800ad20930c1dc45"
     },
     "terminology": {
       "analysis": "555306d4a0d99ffadcc017c283830aef82f3e21b774e3c7c9a8fb44cfd588987",
-      "translation": "c019147f4b3db85223773ecf2dbb2f320249cb710613e5adbf9804f3bbc91868",
+      "translation": "5f3d65ad091fe8035a7f71180552a57e003f57077444579ac6f06dfcb581e3f7",
       "review": "9bb03e8eefa40dc83fae57d53f97b0ccdc4cb8a9ca7faa8064fd722517286a80"
     },
     "traditional": {
       "analysis": "06b4d28ab9dadf01fa9bb46687eb4b2cf4bbb228a136e9976c97885713036cd1",
-      "translation": "9c001e491499c36368b1a1aaa4e5cf0e93a15611f006ba3b6b53c9d1a9ab3fd1",
+      "translation": "dbef1d8850c36cf78aa4af0576c86cecb1b9a8a0933450e9c7b92c3417bc4788",
       "review": "bab0d2b1234e0777d4c276689b5f7d4e99b58dacd2ad7aa4c560972115421dbb"
     },
     "regional": {
       "analysis": "2bec7b2ee740f7c2590d1245d32e6da835e33186b872cf8a50103f8863ad13d5",
-      "translation": "3aa8ca9976b41d0085fce03315fd5c5f4875eb3aa321dcff37c6d241312af9f7",
+      "translation": "06148edc6cf0e82fc88532afbd7450296c9694722398ba7720fe3b810499d0c0",
       "review": "ecee2c079955d259cc43cfc268ad2eec572f449457071cb335114690f4917fbf"
     },
     "vietnamese": {
       "analysis": "944d538a1ea14870aab16f82608a15c97af8e86d8d4bb3bda8be68544d2d61e2",
-      "translation": "7027e029a918f76cc30ae98714d9797b55353bea7dbc7001955b6627d3a375f1",
+      "translation": "ec8f6ec1354cf8ca0a61e6dd3a639cbbfc0d615b1755ab8f4ec7ff735e175e01",
       "review": "b32fd13ef366e1a45348a6e4ce45da0480910b3f7074af5d45027dc8316109e5"
     }
   }
