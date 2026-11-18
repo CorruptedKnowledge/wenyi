@@ -1,4 +1,5 @@
 import { createTranslator, type Locale, type MessageKey } from "./catalog";
+import en from "./locales/en";
 
 type Translator = ReturnType<typeof createTranslator>;
 
@@ -31,6 +32,9 @@ export function workflowStageLabel(
   // and needs the key translated with that argument interpolated.
   if (id.startsWith("progress.stage.")) {
     const [key, argument] = id.split(":");
+    // A key from a newer server than this client has no message yet; show it
+    // as-is rather than handing the translator a key it cannot resolve.
+    if (!Object.hasOwn(en, key)) return fallback;
     return t(key as MessageKey, argument ? { round: argument, count: argument } : undefined);
   }
   return stages[id] ? t(stages[id]) : fallback;

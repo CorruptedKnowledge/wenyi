@@ -31,6 +31,16 @@ class TestCliProgress(unittest.TestCase):
         bridge(778, 1674, "Whole-book review R1")
         self.assertEqual(WorkflowElapsedColumn().render(task).plain, "0:00:25")
 
+    def test_pipeline_progress_keys_render_in_english(self):
+        progress = Progress(disable=True)
+        bridge = RichProgressBridge(progress, "Preparing…")
+        bridge(0, 4, "progress.stage.reviewRound1")
+        self.assertEqual(progress.tasks[0].description, "Whole-book review R1")
+        bridge(1, 4, "progress.stage.arbitration:2")
+        self.assertEqual(progress.tasks[0].description, "Conflict arbitration R2")
+        bridge(0, 3, "Chapter title from the book")
+        self.assertEqual(progress.tasks[0].description, "Chapter title from the book")
+
     def test_indeterminate_progress_updates_preserve_elapsed_time(self):
         now = 10.0
         progress = Progress(disable=True, get_time=lambda: now)

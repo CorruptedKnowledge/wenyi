@@ -144,6 +144,22 @@ test("stage labels distinguish style analysis from translation-time term extract
   }
 });
 
+test("pipeline progress keys translate with their round and fall back when unknown", () => {
+  const en = createTranslator("en");
+  // Every key the pipeline emits must resolve; a missing one used to throw.
+  for (const key of [
+    "progress.stage.prescan",
+    "progress.stage.reviewChapters",
+    "progress.stage.reviewRound1",
+  ]) {
+    expect(workflowStageLabel(key, key, en)).not.toBe(key);
+  }
+  expect(workflowStageLabel("progress.stage.reviewRound:2", "raw", en))
+    .toBe("Blind whole-book review, round 2");
+  expect(workflowStageLabel("progress.stage.chapter:3", "raw", en)).toBe("Chapter 3");
+  expect(workflowStageLabel("progress.stage.fromNewerServer:1", "raw", en)).toBe("raw");
+});
+
 for (const locale of ["en", "zh-CN"] as const) {
   test(`localizes glossary, style, event and export pages in ${locale}`, async ({
     page,
