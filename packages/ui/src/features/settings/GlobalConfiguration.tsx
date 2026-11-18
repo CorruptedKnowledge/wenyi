@@ -100,8 +100,12 @@ export function GlobalConfiguration({ section }: { section: SettingsSectionId })
     onSuccess: ({ value, keysFailed }, body) => {
       applyAnswer(value, body.yaml);
       setUncommitted(false);
-      setRenames({});
-      setProviderRenames({});
+      // Drop only the renames this save carried; one made while it ran still
+      // belongs to the newer draft.
+      const unsent = (current: Record<string, string>, sent: Record<string, string> = {}) =>
+        Object.fromEntries(Object.entries(current).filter(([from, to]) => sent[from] !== to));
+      setRenames((current) => unsent(current, body.model_renames));
+      setProviderRenames((current) => unsent(current, body.provider_renames));
       if (credentials) void credentials.refresh();
       qc.setQueryData(["globalConfig"], value);
       for (const key of ["config", "models", "templates"])
