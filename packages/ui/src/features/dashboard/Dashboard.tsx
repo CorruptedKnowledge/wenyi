@@ -221,7 +221,7 @@ export default function Dashboard() {
             >
               {/* Dismissing the dialog does not stop a delete that is already
                   running, so the label must not promise that it does. */}
-              {tr("common.cancel")}
+              {tr(deleteProject.isPending ? "common.close" : "common.cancel")}
             </Button>
             <Button
               variant="destructive"
