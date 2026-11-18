@@ -59,7 +59,7 @@ test("running review shows its own progress and a ticking task timer, not zero r
         project_id: pid,
         run_id: "task-a",
         kind: "review",
-        label: "Whole-book review R1",
+        label: "progress.stage.reviewRound1",
         done: 37,
         total: 100,
         elapsed_seconds: 40,
@@ -266,7 +266,7 @@ test("unrelated cached progress is rejected and missing totals do not invent per
   progress = {
     project_id: pid,
     run_id: "task-a",
-    label: "Restoring review checkpoint…",
+    label: "progress.stage.reviewCheckpoint",
     done: 0,
     total: 0,
   };
@@ -314,7 +314,7 @@ test("paused review freezes elapsed time and retains unfinished findings in Chin
       progress: {
         project_id: pid,
         run_id: "task-a",
-        label: "Whole-book review R1",
+        label: "progress.stage.reviewRound1",
         done: 5,
         total: 10,
         elapsed_seconds: 45,
@@ -367,7 +367,7 @@ test("new review preparation identifies the previous result and ignores stale so
       progress: {
         project_id: pid,
         run_id: "task-b",
-        label: "Loading review chapters",
+        label: "progress.stage.reviewChapters",
         done: 0,
         total: 0,
         updated_at: "2026-09-17T09:00:00Z",
