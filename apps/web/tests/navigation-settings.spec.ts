@@ -119,6 +119,34 @@ for (const chinese of [false, true]) {
   });
 }
 
+test("project settings keep a field edited while a save is in flight", async ({ page }) => {
+  await fakeApi(page);
+  let release = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route(`**/api/projects/${pid}/config`, async (route) => {
+    if (route.request().method() !== "PUT") return route.fallback();
+    const submitted = JSON.parse(route.request().postDataJSON().yaml);
+    await gate;
+    await route.fulfill({
+      json: { ...configuration, effective: submitted, yaml: JSON.stringify(submitted) },
+    });
+  });
+  await page.goto(`/projects/${pid}/settings`);
+  const review = page.locator("#pipeline-review");
+  await expect(review).toBeEnabled();
+  const initial = await review.isChecked();
+  const requested = page.waitForRequest(
+    (request) => request.method() === "PUT" && request.url().endsWith(`/projects/${pid}/config`),
+  );
+  await page.getByRole("button", { name: "Save configuration", exact: true }).click();
+  await requested;
+  // The form stays usable during the request; the late reply must not revert it.
+  await review.setChecked(!initial);
+  release();
+  await expect(page.getByText("Project settings saved", { exact: true })).toBeVisible();
+  await expect(review).toBeChecked({ checked: !initial });
+});
+
 test("project settings retain invalid inline YAML and prevent basic edits from overwriting it", async ({
   page,
 }) => {
