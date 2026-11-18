@@ -52,8 +52,8 @@ test("glossary options are selectable and failed saves stay readable over the di
   await page.waitForTimeout(1600);
   await expect(toast).toBeVisible();
   const close = await expectInsetCloseButton(toast);
-  // The card passes clicks through; its close control must still sit above the modal.
-  expect(await close.evaluate(element => {
+  // Verify the notification paints above the modal, not merely within viewport.
+  expect(await toast.evaluate(element => {
     const rect = element.getBoundingClientRect();
     return element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
   })).toBe(true);
@@ -139,15 +139,21 @@ test("slow asynchronous feedback ignores scrolling and unrelated button clicks",
   await expect(page.locator("[data-sonner-toaster]")).toHaveCSS("position", "fixed");
   await page.waitForTimeout(400);
   const before = await toast.boundingBox();
-  const sidebar = page.getByRole("complementary");
-  const expanded = (await sidebar.boundingBox())!.width;
   await page.evaluate(() => {
     document.querySelector<HTMLElement>('[data-slot="content"]')!.scrollTop = 0;
   });
+  const sidebar = page.locator('aside[data-slot="sidebar"]');
+  const expanded = (await sidebar.boundingBox())!.width;
   await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
-  await expect(sidebar).toHaveCSS("width", "64px");
-  await expect.poll(async () => (await toast.boundingBox())?.x)
-    .toBeCloseTo(before!.x + (64 - expanded) / 2, 0);
-  expect((await toast.boundingBox())!.y).toBeCloseTo(before!.y, 0);
+  await expect(sidebar).toHaveAttribute("data-collapsed", "true");
+  // The stack is centred on the content pane, so it follows the sidebar by half
+  // of its width change once the transition settles; scrolling moves nothing.
+  await expect.poll(async () => (await sidebar.boundingBox())!.width).toBeLessThan(expanded / 2);
+  await page.waitForTimeout(400);
+  const collapsed = (await sidebar.boundingBox())!.width;
+  await expect(toast).toBeInViewport();
+  const after = await toast.boundingBox();
+  expect(after!.x).toBeCloseTo(before!.x - (expanded - collapsed) / 2, 0);
+  expect(after!.y).toBeCloseTo(before!.y, 0);
 });
 }
