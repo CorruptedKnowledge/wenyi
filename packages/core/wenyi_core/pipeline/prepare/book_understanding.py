@@ -249,7 +249,7 @@ class BookUnderstandingService:
                         failed.append(ci)
                         store.log_event("book_understanding_chapter_digest_failed", chapter=ci)
                     if progress:
-                        progress(n_done, len(todo), "Prescanning chapter digests")
+                        progress(n_done, len(todo), "progress.stage.prescan")
 
         if error is not None:
             raise error

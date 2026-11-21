@@ -116,12 +116,15 @@ export function NotificationToaster() {
           // Sonner removes a dismissed toast on a fixed timer, so a long
           // transition gets cut off mid-flight and reads as a frozen frame
           // followed by a pop. Keep the movement inside that window.
-          toast: "pointer-events-none min-h-16 items-start gap-3 rounded-xl py-5 pl-4 pr-16 text-sm "
+          // The toast itself takes the pointer: hovering pauses its timer so an
+          // error can be read and copied before it leaves. Only the gaps around it
+          // (the list above) let clicks through to the page.
+          toast: "pointer-events-auto min-h-16 items-start gap-3 rounded-xl py-5 pl-4 pr-16 text-sm "
             + "shadow-e4",
           content: "min-w-0",
           icon: "m-0 h-5 w-5 [&_svg]:m-0",
           // Keep Sonner's dismissal behavior, but move the target inside the card.
-          closeButton: "pointer-events-auto left-auto right-2.5 top-2.5 h-11 w-11 transform-none rounded-lg border-0 "
+          closeButton: "left-auto right-2.5 top-2.5 h-11 w-11 transform-none rounded-lg border-0 "
             + "!bg-transparent !text-inherit hover:!bg-hover focus-visible:!bg-hover active:!bg-selected",
         },
       }}

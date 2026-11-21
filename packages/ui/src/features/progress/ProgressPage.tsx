@@ -203,7 +203,8 @@ function TaskControlButton({
       aria-busy={pending || undefined}
       // Not `disabled`: that applies the disabled face (half opacity, no shadow)
       // for the length of the request, so the icon dims and comes back — a blink
-      // at the corner of the header. The ref guard stops the second press instead.
+      // at the corner of the header. The pending check in the handler stops the
+      // second press instead.
       onClick={() => { if (!pending) onClick(); }}
     >
       {/* Play or pause, nothing else. A spinner in between added a third glyph —
