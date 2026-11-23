@@ -810,3 +810,118 @@ def test_consistency_sweep_catches_and_patches_watched_title_casing_split(tmp_pa
     )
     assert res_s.drift_patches_applied == 2
     assert "the King" in (store.load_chapter(1).text_segments[0].target or "")
+
+
+def test_pr31_review_regressions(tmp_path):
+    import pytest
+    from wenyi_core.storage.file import FileStorage
+
+    cfg = Config(source_lang="zh", target_lang="en", llm=LLMConfig(preset="fake"))
+
+    # 1. Title-only Book Bible adjudication runs even when proper-noun candidates list is empty.
+    adjudicate_called = 0
+
+    def title_only_handler(messages, operation, json_mode):
+        nonlocal adjudicate_called
+        if "terminology prober" in messages[0]["content"]:
+            return json.dumps({"renderings": {"国主": "the king"}})
+        adjudicate_called += 1
+        return json.dumps({"terms": [], "conventions": ["Render 国主 as 'the king'."]})
+
+    agent = BookBibleAgent(FakeClient(title_only_handler), cfg)
+    res_b = agent.compile_bible(
+        ["国主 presides."],
+        "国主微笑。国主下旨。国主召见。国主沉思。国主问政。国主点头。",
+    )
+    assert adjudicate_called == 1
+    assert res_b.conventions == ("Render 国主 as 'the king'.",)
+
+    # 2. Voice calibration propagates resumable provider interrupts so bible cache is never poisoned.
+    def outage_handler(messages, operation, json_mode):
+        raise TimeoutError("provider temporary outage")
+
+    outage_agent = BookBibleAgent(FakeClient(outage_handler), cfg)
+    with pytest.raises(TimeoutError):
+        outage_agent.compile_voice_exemplars(["段一长文。", "段二长文。"], terms=())
+
+    # 3. Ordinary two-character sentence ("He took her hand, and she smiled.") is NOT flagged as pronoun flip.
+    normal_report = assess_batch_risk(
+        ["他握着她的手，她微微一笑。"],
+        ["He took her hand, and she smiled."],
+        source_lang="zh",
+        target_lang="en",
+    )
+    assert all(a.code != "pronoun_consistency" for a in normal_report.alerts)
+
+    # 4. Lowercase canonical drift decision ("the king") still patches mid-sentence "the King".
+    store = FileStorage(str(tmp_path / "lower_canon"), create=True)
+    store.save_chapter(
+        Chapter(
+            index=0,
+            title="Ch 0",
+            segments=[
+                Segment(index=0, source="国主下旨。", target="At dawn, the King issued a decree."),
+                Segment(index=1, source="国主召见。", target="Soon, the King summoned his court."),
+                Segment(
+                    index=2, source="普通叙述甲。", target="Ordinary narration alpha continues."
+                ),
+                Segment(
+                    index=3, source="普通叙述乙。", target="Ordinary narration beta continues."
+                ),
+                Segment(
+                    index=4, source="普通叙述丙。", target="Ordinary narration gamma continues."
+                ),
+            ],
+        )
+    )
+    store.save_chapter(
+        Chapter(
+            index=1,
+            title="Ch 1",
+            segments=[
+                Segment(index=0, source="国主回宫。", target="At dusk, the king returned home."),
+                Segment(index=1, source="国主赏赐。", target="Quietly, the king bestowed gold."),
+                Segment(
+                    index=2, source="普通叙述丁。", target="Ordinary narration delta continues."
+                ),
+                Segment(
+                    index=3, source="普通叙述戊。", target="Ordinary narration epsilon goes on."
+                ),
+                Segment(
+                    index=4, source="普通叙述己。", target="Ordinary narration zeta continues."
+                ),
+            ],
+        )
+    )
+
+    def lower_handler(messages, operation, json_mode):
+        if "book consistency editor" in messages[0]["content"]:
+            return json.dumps({"decisions": {"国主": "the king"}})
+        return json.dumps(
+            {
+                "patches": [
+                    {
+                        "index": 0,
+                        "reason": "title_casing",
+                        "text": "At dawn, the king issued a decree.",
+                    },
+                    {
+                        "index": 1,
+                        "reason": "title_casing",
+                        "text": "Soon, the king summoned his court.",
+                    },
+                ]
+            }
+        )
+
+    svc = ConsistencySweepService(
+        SparseSemanticEditor(FakeClient(lower_handler), cfg), source_lang="zh", target_lang="en"
+    )
+    res_low = svc.run(
+        store,
+        chapter_indices=[0, 1],
+        terms=[],
+        divergent_titles={"国主": ("the king",)},
+    )
+    assert res_low.drift_patches_applied == 2
+    assert "the king" in (store.load_chapter(0).text_segments[0].target or "")

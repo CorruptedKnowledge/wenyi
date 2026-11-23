@@ -34,6 +34,7 @@ from ..i18n.languages import (
     glossary_single_character_names_only,
 )
 from ..llm.json_parser import JsonParseError
+from ..llm.retrying import is_resumable_provider_interrupt
 from ..models.glossary import GlossaryTerm, normalize_gender
 from .base import Agent
 
@@ -857,7 +858,7 @@ class BookBibleAgent(Agent):
         divergent_titles: Sequence[tuple[BibleCandidate, str, str]] = (),
     ) -> tuple[list[GlossaryTerm], list[str]]:
         """Adjudicate one bounded chunk of candidates with global synopsis + anchor terms."""
-        if not candidates:
+        if not candidates and not (include_conventions and divergent_titles):
             return [], []
         existing_block = "\n".join(
             f"- {t.source} => {t.target} ({t.type})" for t in existing_terms[:60]
@@ -1024,11 +1025,21 @@ class BookBibleAgent(Agent):
         divergent_titles: Sequence[tuple[BibleCandidate, str, str]] = (),
     ) -> tuple[list[GlossaryTerm], tuple[str, ...]]:
         """Settle all kept candidates and compile book-wide non-glossary conventions."""
-        if not candidates:
+        if not candidates and not divergent_titles:
             return [], ()
         all_terms: list[GlossaryTerm] = []
         conventions: list[str] = []
         anchors = list(existing_terms)
+        if not candidates:
+            _terms, chunk_convs = self._adjudicate_chunk(
+                (),
+                book_synopsis=book_synopsis,
+                style=style,
+                existing_terms=anchors,
+                include_conventions=True,
+                divergent_titles=divergent_titles,
+            )
+            return [], tuple(chunk_convs[:8])
         step = len(candidates) if len(candidates) <= 55 else min(chunk_size, 45)
         for offset in range(0, len(candidates), step):
             chunk = candidates[offset : offset + step]
@@ -1093,6 +1104,8 @@ class BookBibleAgent(Agent):
                 thinking_boost=1,
             )
         except Exception as exc:  # noqa: BLE001 - optional voice anchor; chapters still translate.
+            if is_resumable_provider_interrupt(exc):
+                raise
             _LOGGER.warning("Compiling voice exemplars failed (%s); skipping", exc)
             return ()
         raw_map = data.get("exemplars") if isinstance(data, dict) else None
@@ -1145,6 +1158,8 @@ class BookBibleAgent(Agent):
                 operation="glossary.extract",
             )
         except Exception as exc:  # noqa: BLE001 - optional optimization; chapters still translate.
+            if is_resumable_provider_interrupt(exc):
+                raise
             _LOGGER.warning("Pre-translating repeated quotes failed (%s); skipping", exc)
             return {}
         raw_quotes = data.get("quotes") if isinstance(data, dict) else None

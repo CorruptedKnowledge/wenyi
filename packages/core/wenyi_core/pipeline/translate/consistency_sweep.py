@@ -541,14 +541,25 @@ class ConsistencySweepService:
                             continue
                         stripped_canon = canonical_tgt.strip()
                         core_canon = re.sub(r"^(?:the|a|an)\s+", "", stripped_canon, flags=re.I)
-                        if (
-                            self._tgt.lower().split("-", 1)[0] == "en"
-                            and core_canon
-                            and any(c.isupper() for c in core_canon)
-                        ):
-                            # Respect intentional capitalization (e.g. "King" vs "king").
-                            if re.search(rf"\b{re.escape(core_canon)}s?\b", seg.target):
-                                continue
+                        if self._tgt.lower().split("-", 1)[0] == "en" and core_canon:
+                            if any(c.isupper() for c in core_canon):
+                                # Respect intentional capitalization (e.g. "King" vs "king").
+                                if re.search(rf"\b{re.escape(core_canon)}s?\b", seg.target):
+                                    continue
+                            else:
+                                # Lowercase canonical (e.g. "king"): skip only if no mid-sentence
+                                # capitalized variant remains and the canonical term is present.
+                                cap_variant = core_canon[0].upper() + core_canon[1:]
+                                has_mid_cap = bool(
+                                    re.search(
+                                        rf"(?<=[a-z,;:—]\s){re.escape(cap_variant)}s?\b",
+                                        seg.target,
+                                    )
+                                )
+                                if not has_mid_cap and _target_contains_term(
+                                    seg.target, canonical_tgt, target_lang=self._tgt
+                                ):
+                                    continue
                         elif _target_contains_term(
                             seg.target, canonical_tgt, target_lang=self._tgt
                         ):

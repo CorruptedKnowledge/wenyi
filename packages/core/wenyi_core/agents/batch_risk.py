@@ -199,24 +199,18 @@ def _source_mentions_term_or_stem(
 
 
 def _has_suspicious_pronoun_flip(src: str, clean_drf: str, *, src_base: str, tgt_base: str) -> bool:
-    """Detect mid-sentence masculine<->feminine pronoun flips in narration (e.g. disguise scenes)."""
+    """Detect mid-sentence masculine<->feminine pronoun flips in disguise/concealment scenes."""
     if tgt_base != "en":
         return False
-    narration = _EN_QUOTED_SPAN_RE.sub(" ", clean_drf)
-    src_narration = _ZH_QUOTED_SPAN_RE.sub(" ", src) if src_base == "zh" else src
-    zh_disguise_or_mixed = src_base == "zh" and (
-        bool(_ZH_DISGUISE_CUE_RE.search(src)) or ("他" in src_narration and "她" in src_narration)
+    has_disguise_cue = (src_base == "zh" and bool(_ZH_DISGUISE_CUE_RE.search(src))) or (
+        src_base == "ja" and any(k in src for k in ("男装", "女装", "変装", "正体"))
     )
+    if not has_disguise_cue:
+        return False
+    narration = _EN_QUOTED_SPAN_RE.sub(" ", clean_drf)
     for sent in _EN_SENTENCE_SPLIT_RE.split(narration):
         sent = sent.strip()
-        if not sent:
-            continue
-        if not (_EN_MALE_PRONOUN_RE.search(sent) and _EN_FEMALE_PRONOUN_RE.search(sent)):
-            continue
-        # Only flag if disguise/mixed-source cues exist OR there is <=1 mid-sentence named person
-        # (so two named characters of different genders aren't interacting in the same sentence).
-        mid_names = set(_EN_MID_CAP_NAME_RE.findall(sent))
-        if zh_disguise_or_mixed or len(mid_names) <= 1:
+        if sent and _EN_MALE_PRONOUN_RE.search(sent) and _EN_FEMALE_PRONOUN_RE.search(sent):
             return True
     return False
 
