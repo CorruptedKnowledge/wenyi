@@ -96,7 +96,7 @@ _ZH_VOCATIVE_SHIFT_RE = re.compile(
 _EN_CALQUE_SENTINEL_RE = re.compile(
     r"\b(?:dream(?:ed|ing)?\s+(?:its\s+|a\s+)?drunken\s+dream\s+of\s+death|"
     r"fire-dwelling\s+daoist|filled\s+in\s+lyrics|flashed\s+with\s+treasure\s+light|"
-    r"to\s+death\s+with\s+her|ten\s+thousand\s+years)\b",
+    r"to\s+death\s+with\s+her|ten\s+thousand\s+years|the\s+sir)\b",
     re.I,
 )
 _ZH_CLASSICAL_PARTICLES_RE = re.compile(r"[之乎者也矣焉哉岂豈孰乃遂故既若非莫勿裣衽斂衽]")

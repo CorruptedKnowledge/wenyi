@@ -544,6 +544,16 @@ def test_batch_risk_catches_phantom_entity_pronoun_flip_and_oxen_allusion():
     assert (3, "phantom_entity") not in by_idx
     assert report.should_escalate is True
 
+    # Ungrammatical third-person "the sir" calque triggers calque_or_idiom escalation.
+    sir_report = assess_batch_risk(
+        ["不要惊动先生。"],
+        ["Let us not disturb the sir."],
+        source_lang="zh",
+        target_lang="en",
+    )
+    assert sir_report.should_escalate is True
+    assert any(a.code == "calque_or_idiom" for a in sir_report.alerts)
+
 
 def test_book_bible_captures_divergent_titles_and_compiles_voice_exemplars():
     cfg = Config(source_lang="zh", target_lang="en", llm=LLMConfig(preset="fake"))

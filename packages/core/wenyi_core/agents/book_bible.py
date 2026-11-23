@@ -882,7 +882,9 @@ class BookBibleAgent(Agent):
             "stiff translationese calques (e.g. prefer natural 'I' over archaic literalized humble "
             "pronouns, concise polity/place names over repetitive 'the State of X', one uniform era-date "
             "format across all chapters, and natural direct-address titles over awkward "
-            "third-person address). Never collapse distinct ranks (e.g. keep a sovereign King/Emperor "
+            "third-person address — e.g. in historical/classical works, specify 'Master [Surname]' / "
+            "'Master' for titled or third-person 先生, never modern 'Mr.' or ungrammatical 'the sir'). "
+            "Never collapse distinct ranks (e.g. keep a sovereign King/Emperor "
             "distinct from a subordinate Prince).\n"
             if include_conventions
             else ""
