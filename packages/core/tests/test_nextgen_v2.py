@@ -398,3 +398,114 @@ def test_consistency_sweep_unifies_quotes_and_detects_mid_freq_drift(tmp_path):
     res = svc.run(store, chapter_indices=[0, 1], terms=[])
     assert res.quotes_unified == 1
     assert store.load_chapter(1).text_segments[0].target == ch0.text_segments[0].target
+
+
+def test_pr30_review_regressions(tmp_path):
+    from wenyi_core.storage.file import FileStorage
+
+    # 1. Chinese corpus mining keeps names ending in 氏 / 君 (no Japanese honorific filter).
+    zh_corpus = "王氏出面调解。王氏微笑。王氏叹气。王氏点头。孟尝君设宴。孟尝君大笑。孟尝君起身。"
+    zh_cands = {c.source for c in mine_bible_candidates([], zh_corpus, source_lang="zh")}
+    assert "王氏" in zh_cands
+    assert "孟尝君" in zh_cands
+
+    # 2. _cluster_candidate_rows deduplicates repeated stem hits on the same candidate.
+    dup_cands = [
+        (BibleCandidate("明月明月", 5, True, "", ""), "Mingyue", "Mingyue", False),
+        (BibleCandidate("明月楼", 4, True, "", ""), "Mingyue Tower", "Moon Tower", True),
+    ]
+    rows = _cluster_candidate_rows(dup_cands)
+    assert sum("明月明月" in r for r in rows) == 1
+
+    # 3. Spoiler-safe gender guard does not clear male gender on mixed-gender dialogue about two people.
+    mixed = _apply_spoiler_safe_gender_guard(
+        [GlossaryTerm(source="张明", target="Zhang Ming", type="person", gender="male")],
+        "张明看着李芳，他说她应该回家。",
+        source_lang="zh",
+    )
+    assert mixed[0].gender == "male"
+
+    # 4. post_normalize: URL mask leaves closing quote intact, em-dash \n unescapes, OLD Gao stays intact.
+    url_cleaned, _ = normalize_chapter_latin_typography(
+        [
+            ("他说。", 'He said, "Hello."'),
+            ("她说。", "“Visit https://example.com”"),
+            ("诗。", "A spring outing—\\nApricot blossoms."),
+        ],
+        target_lang="en",
+    )
+    assert url_cleaned[1] == '"Visit https://example.com"'
+    assert url_cleaned[2] == "A spring outing—\nApricot blossoms."
+
+    norm_res, _ = normalize_minority_names(
+        [("高老", "OLD Gao spoke, and Gao nodded.")],
+        [GlossaryTerm(source="高老", target="Old Gao", type="person")],
+        variants_by_source={"高老": ("Gao",)},
+        target_lang="en",
+    )
+    assert norm_res[0] == "OLD Gao spoke, and Old Gao nodded."
+
+    # 5. QuoteMemory: punctuation distinguishes We'll vs Well,, multi-quote doesn't cross-assign,
+    #    and cross_chapter_spans order is deterministic.
+    qm_punct = QuoteMemory.from_chapters(
+        [
+            (0, ["We'll remember everything forever.", "Well, remember everything forever."]),
+        ]
+    )
+    assert qm_punct.repeated_count == 0
+
+    qm_multi = QuoteMemory.from_chapters(
+        [
+            (
+                0,
+                [
+                    'He said, "Never forget the oath of winter." and "Hold the northern wall tonight."'
+                ],
+            ),
+            (1, ['She whispered, "Never forget the oath of winter."']),
+        ]
+    )
+    qm_multi.observe(
+        (0, 0),
+        'He said, "Never forget the oath of winter." and "Hold the northern wall tonight."',
+        'He said, "Never forget the winter oath."',
+    )
+    assert qm_multi.exact_match("Never forget the oath of winter.") is None
+    assert (
+        qm_multi.references_for_batch(['She whispered, "Never forget the oath of winter."']) == []
+    )
+
+    # 6. ConsistencySweepService protects segments with docx_styles metadata.
+    store = FileStorage(str(tmp_path / "docx_guard"), create=True)
+    ch0 = Chapter(
+        index=0,
+        title="Ch 0",
+        segments=[
+            Segment(
+                index=0, source="妾拟将身嫁与，纵被无情弃，不能羞。", target="Canonical quote line."
+            ),
+        ],
+    )
+    ch1 = Chapter(
+        index=1,
+        title="Ch 1",
+        segments=[
+            Segment(
+                index=0,
+                source="妾拟将身嫁与，纵被无情弃，不能羞。",
+                target="Protected DOCX styled line.",
+                meta={"docx_styles": {"placements": []}},
+            ),
+        ],
+    )
+    store.save_chapter(ch0)
+    store.save_chapter(ch1)
+    cfg = Config(source_lang="zh", target_lang="en", llm=LLMConfig(preset="fake"))
+    svc = ConsistencySweepService(
+        SparseSemanticEditor(FakeClient(lambda m, op, jm: json.dumps({"patches": []})), cfg),
+        source_lang="zh",
+        target_lang="en",
+    )
+    res_docx = svc.run(store, chapter_indices=[0, 1], terms=[])
+    assert res_docx.quotes_unified == 0
+    assert store.load_chapter(1).text_segments[0].target == "Protected DOCX styled line."

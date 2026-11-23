@@ -129,6 +129,7 @@ def _has_offset_bound_metadata(seg: Segment) -> bool:
         or meta.get("epub_annotations")
         or meta.get("pdf_annotations")
         or meta.get("docx_runs")
+        or meta.get("docx_styles")
         or meta.get("object_repairs")
     )
 

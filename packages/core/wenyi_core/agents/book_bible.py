@@ -471,11 +471,7 @@ def mine_bible_candidates(
                     continue
                 for start in range(clen - n + 1):
                     gram = chunk[start : start + n]
-                    if (
-                        gram[0] in _CJK_EDGE_PARTICLES
-                        or gram[-1] in _CJK_EDGE_PARTICLES
-                        or gram[-1] in _JA_TRAILING_HONORIFIC_CHARS
-                    ):
+                    if gram[0] in _CJK_EDGE_PARTICLES or gram[-1] in _CJK_EDGE_PARTICLES:
                         continue
                     corpus_counts[gram] += 1
     else:
@@ -606,7 +602,7 @@ def _cluster_candidate_rows(
         )
 
     for stem, indices in sorted(stem_groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
-        fresh = [i for i in indices if i not in emitted]
+        fresh = list(dict.fromkeys(i for i in indices if i not in emitted))
         if len(fresh) >= 2:
             rows.append(f"[Linked family: {stem}]")
             for i in fresh:
@@ -632,20 +628,27 @@ def _apply_spoiler_safe_gender_guard(
         if term.type != "person" or term.gender not in {"male", "female"}:
             out.append(term)
             continue
-        male_hits = 0
-        female_hits = 0
+        male_only_hits = 0
+        female_only_hits = 0
         for m in re.finditer(re.escape(term.source), source_corpus):
-            window = source_corpus[m.end() : min(len(source_corpus), m.end() + 40)]
-            if "他" in window:
-                male_hits += 1
-            if "她" in window:
-                female_hits += 1
+            raw_window = source_corpus[m.end() : min(len(source_corpus), m.end() + 35)]
+            # Stop at sentence boundaries so pronouns in the next sentence don't bleed in, and
+            # require exclusive pronoun evidence per mention so mixed-gender dialogue about two
+            # people ("张明看着李芳，他说她应该回家。") is not mistaken for a disguised character.
+            clause = re.split(r"[。！？\n]", raw_window, maxsplit=1)[0]
+            has_male = "他" in clause
+            has_female = "她" in clause
+            if has_male and not has_female:
+                male_only_hits += 1
+            elif has_female and not has_male:
+                female_only_hits += 1
         title_clash = term.gender == "female" and any(
             t in term.source for t in _ZH_MALE_PRESENTING_TITLES
         )
-        # If the source text uses BOTH 他 and 她 around the same character (or pairs a male-presenting
-        # title like 公子 with female gender), keep gender unknown so scenes follow local POV pronouns.
-        if (male_hits >= 1 and female_hits >= 1) or title_clash:
+        # If separate mentions use exclusively 他 vs exclusively 她 for the same character (or pair
+        # a male-presenting title like 公子 with female gender), keep gender unknown so scenes
+        # follow local POV pronouns.
+        if (male_only_hits >= 1 and female_only_hits >= 1) or title_clash:
             note = term.note
             spoiler_note = "Follow scene-local POV pronouns; do not spoil gender."
             if spoiler_note.lower() not in note.lower():

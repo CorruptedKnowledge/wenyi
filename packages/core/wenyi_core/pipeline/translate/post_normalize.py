@@ -35,13 +35,13 @@ _TYPOGRAPHY_PROTECTED_RE = re.compile(
     r"|(?<!\\)\\\[[\s\S]*?(?<!\\)\\\]"
     r"|(?<!\\)\\\([\s\S]*?(?<!\\)\\\)"
     r"|(?<!\\)\$(?!\$)(?!\s)(?:\\.|[^$\\\n])+?(?<!\s)\$(?![$\d])"
-    r"|https?://\S+"
+    r"|https?://[^\s\"'“”‘’]+"
 )
 # Match standalone leaked literal '\n' line breaks without touching LaTeX commands
 # ('\neq', '\nu', '\nabla', '\nRightarrow'), escaped backslashes ('\\n'), or paths ('C:\new').
 _ESCAPED_NEWLINE_RE = re.compile(
     r"(?<!\\)(?:\\n)+(?![A-Za-z])"
-    r"|(?<=[.,;!?…\"”'’】》」』])(?<!\\)(?:\\n)+(?=[A-Za-z])"
+    r"|(?<=[.,;!?…—\"”'’】》」』])(?<!\\)(?:\\n)+(?=[A-Za-z])"
 )
 _RAW_DOUBLE_DASH_RE = re.compile(r"(?<!-)(?: -- |--)(?!-)")
 # Normalize mid-sentence spaced em dashes (" — ") to tight American em dashes ("—") while
@@ -469,12 +469,14 @@ def normalize_minority_names(
             # existing canonical occurrence (e.g. "Old Gao" -> never "Old Old Gao"), while
             # still normalizing genuine intra-paragraph mixed spellings elsewhere in the text.
             ordered = sorted(dict.fromkeys([canonical, *candidates]), key=len, reverse=True)
+            alternatives = [
+                rf"(?i:{re.escape(v)})" if v.casefold() == canonical.casefold() else re.escape(v)
+                for v in ordered
+            ]
             if is_cjk_target:
-                combined_pat = re.compile("|".join(re.escape(v) for v in ordered))
+                combined_pat = re.compile("|".join(alternatives))
             else:
-                combined_pat = re.compile(
-                    rf"(?<![^\W\d_])(?:{'|'.join(re.escape(v) for v in ordered)})(?![^\W\d_])"
-                )
+                combined_pat = re.compile(rf"(?<![^\W\d_])(?:{'|'.join(alternatives)})(?![^\W\d_])")
             matched_variants: list[str] = []
             canon_cf = canonical.casefold()
 
