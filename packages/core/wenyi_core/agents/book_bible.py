@@ -389,6 +389,42 @@ def _is_generic_target(target: str, generic_words: frozenset[str]) -> bool:
 
 
 _JA_TRAILING_HONORIFIC_CHARS = frozenset("様殿君氏卿")
+_BARE_PRONOUN_TARGETS = frozenset(
+    {
+        "i",
+        "me",
+        "my",
+        "we",
+        "us",
+        "our",
+        "you",
+        "your",
+        "he",
+        "him",
+        "his",
+        "she",
+        "her",
+        "they",
+        "them",
+        "their",
+        "it",
+        "its",
+        "this",
+        "that",
+        "these",
+        "those",
+        "one",
+        "sir",
+        "madam",
+        "yes",
+        "no",
+    }
+)
+
+
+def _is_bare_pronoun_target(target: str) -> bool:
+    words = _WORD_RE.findall(target.casefold())
+    return not words or all(w.replace("’", "'") in _BARE_PRONOUN_TARGETS for w in words)
 
 
 def _clean_latin_candidate(token: str) -> str:
@@ -1167,13 +1203,17 @@ class BookBibleAgent(Agent):
             ra_gen = not ra or _is_generic_target(ra, generic_words)
             rb_gen = not rb or _is_generic_target(rb, generic_words)
             if ra_gen and rb_gen:
-                # Keep high-frequency divergent generic titles/offices (e.g. 国主 -> king vs monarch)
-                # for book-wide conventions without polluting the proper-noun glossary table.
+                # Keep high-frequency generic titles/offices (e.g. 国主 -> King/sovereign) for
+                # book-wide capitalization & lexical conventions even when the two probes agree.
                 if (
                     ra
                     and rb
-                    and (cand.count >= 4 or cand.from_digest)
-                    and not equivalent_targets(ra, rb)
+                    and not _is_bare_pronoun_target(ra)
+                    and not _is_bare_pronoun_target(rb)
+                    and (
+                        ((cand.count >= 4 or cand.from_digest) and not equivalent_targets(ra, rb))
+                        or cand.count >= 6
+                    )
                 ):
                     divergent_generic.append((cand, ra, rb))
                 continue

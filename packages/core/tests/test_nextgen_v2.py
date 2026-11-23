@@ -700,3 +700,103 @@ def test_consistency_sweep_filters_function_noise_and_patches_confirmed_title_dr
     assert res.drift_patches_applied == 3
     ch1_saved = store.load_chapter(1)
     assert all("sovereign" in (s.target or "") for s in ch1_saved.text_segments[:3])
+
+
+def test_consistency_sweep_catches_and_patches_watched_title_casing_split(tmp_path):
+    from wenyi_core.storage.file import FileStorage
+
+    # 1. Book Bible watches high-frequency agreed generic title (count >= 6), skipping bare pronouns.
+    cfg = Config(source_lang="zh", target_lang="en", llm=LLMConfig(preset="fake"))
+    agent = BookBibleAgent(
+        FakeClient(
+            lambda m, op, jm: (
+                json.dumps({"renderings": {"国主": "the King", "大人": "sir"}})
+                if "terminology prober" in m[0]["content"]
+                else json.dumps({"terms": [], "conventions": ["Render 国主 as 'the King'."]})
+            )
+        ),
+        cfg,
+    )
+    corpus = "国主微笑。国主下旨。国主召见。国主沉思。国主问政。国主点头。大人请坐。大人微笑。大人点头。大人叹气。大人起身。大人告退。"
+    res_b = agent.compile_bible(["国主 speaks with 大人."], corpus)
+    watched = dict(res_b.divergent_titles)
+    assert "国主" in watched
+    assert "大人" not in watched
+
+    # 2. Case-sensitive mid-sentence split ("the King" vs "the king") is detected and patched.
+    store = FileStorage(str(tmp_path / "casing"), create=True)
+    ch0 = Chapter(
+        index=0,
+        title="Ch 0",
+        segments=[
+            Segment(index=0, source="国主下旨。", target="At dawn, the King issued a decree."),
+            Segment(index=1, source="国主召见。", target="Soon, the King summoned his council."),
+            Segment(index=2, source="国主问政。", target="Later, the King asked about Shu."),
+            Segment(
+                index=3, source="普通叙述甲。", target="Ordinary narration alpha continues here."
+            ),
+            Segment(
+                index=4, source="普通叙述乙。", target="Ordinary narration beta continues here."
+            ),
+        ],
+    )
+    ch1 = Chapter(
+        index=1,
+        title="Ch 1",
+        segments=[
+            Segment(index=0, source="国主回宫。", target="At dusk, the king returned to court."),
+            Segment(index=1, source="国主赏赐。", target="Quietly, the king bestowed rewards."),
+            Segment(
+                index=2, source="普通叙述丙。", target="Ordinary narration gamma continues here."
+            ),
+            Segment(
+                index=3, source="普通叙述丁。", target="Ordinary narration delta continues here."
+            ),
+            Segment(index=4, source="普通叙述戊。", target="Ordinary narration epsilon continues."),
+        ],
+    )
+    store.save_chapter(ch0)
+    store.save_chapter(ch1)
+    clusters = detect_mid_frequency_drift(
+        [ch0, ch1],
+        source_lang="zh",
+        target_lang="en",
+        existing_glossary_sources=set(),
+        extra_watch_sources={"国主": ("the King",)},
+    )
+    assert any(
+        c.source == "国主" and {t for t, _ in c.competing_targets} == {"King", "king"}
+        for c in clusters
+    )
+
+    def handler(messages, operation, json_mode):
+        if "book consistency editor" in messages[0]["content"]:
+            return json.dumps({"decisions": {"国主": "the King"}})
+        return json.dumps(
+            {
+                "patches": [
+                    {
+                        "index": 0,
+                        "reason": "title_casing",
+                        "text": "At dusk, the King returned to court.",
+                    },
+                    {
+                        "index": 1,
+                        "reason": "title_casing",
+                        "text": "Quietly, the King bestowed rewards.",
+                    },
+                ]
+            }
+        )
+
+    svc = ConsistencySweepService(
+        SparseSemanticEditor(FakeClient(handler), cfg), source_lang="zh", target_lang="en"
+    )
+    res_s = svc.run(
+        store,
+        chapter_indices=[0, 1],
+        terms=[],
+        divergent_titles={"国主": ("the King",)},
+    )
+    assert res_s.drift_patches_applied == 2
+    assert "the King" in (store.load_chapter(1).text_segments[0].target or "")

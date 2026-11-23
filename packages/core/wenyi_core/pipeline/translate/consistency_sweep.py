@@ -338,25 +338,60 @@ def detect_mid_frequency_drift(
             ):
                 distinctive.append((word, cnt))
 
-        if len(distinctive) < 2:
-            continue
-        # Check mutual exclusivity of top two distinctive target words (split rendering signal!).
-        (w1, c1), (w2, c2) = distinctive[0], distinctive[1]
-        both = sum(
-            1
-            for _ci, _si, tgt in occurrences
-            if re.search(rf"\b{re.escape(w1)}s?\b", tgt, re.I)
-            and re.search(rf"\b{re.escape(w2)}s?\b", tgt, re.I)
-        )
-        if both <= min(c1, c2) * 0.30 and (c1 + c2) >= n_occ * 0.55:
-            clusters.append(
-                DriftCluster(
-                    source=gram,
-                    total_hits=n_occ,
-                    competing_targets=((w1, c1), (w2, c2)),
-                    paragraph_refs=tuple((ci, si) for ci, si, _ in occurrences),
-                )
+        if len(distinctive) >= 2:
+            # Check mutual exclusivity of top two distinctive target words (split rendering signal!).
+            (w1, c1), (w2, c2) = distinctive[0], distinctive[1]
+            both = sum(
+                1
+                for _ci, _si, tgt in occurrences
+                if re.search(rf"\b{re.escape(w1)}s?\b", tgt, re.I)
+                and re.search(rf"\b{re.escape(w2)}s?\b", tgt, re.I)
             )
+            if both <= min(c1, c2) * 0.30 and (c1 + c2) >= n_occ * 0.55:
+                clusters.append(
+                    DriftCluster(
+                        source=gram,
+                        total_hits=n_occ,
+                        competing_targets=((w1, c1), (w2, c2)),
+                        paragraph_refs=tuple((ci, si) for ci, si, _ in occurrences),
+                    )
+                )
+                continue
+
+        # For watched recurring titles, also catch mid-sentence capitalization splits
+        # (e.g. "the King" in Ch 1 vs "the king" in Ch 2) that case-folding hides.
+        if is_watched and word_counts:
+            top_word, top_cnt = word_counts.most_common(1)[0]
+            if top_cnt >= 3 and (top_cnt / n_occ) >= 0.40:
+                cap_hits = 0
+                low_hits = 0
+                cap_chs: set[int] = set()
+                low_chs: set[int] = set()
+                pat = re.compile(rf"(?<=[a-z,;:—]\s)({re.escape(top_word)}s?)\b", re.I)
+                for ci, _si, tgt in occurrences:
+                    matches = pat.findall(tgt)
+                    if not matches:
+                        continue
+                    has_cap = any(m[0].isupper() for m in matches)
+                    has_low = any(m[0].islower() for m in matches)
+                    if has_cap and not has_low:
+                        cap_hits += 1
+                        cap_chs.add(ci)
+                    elif has_low and not has_cap:
+                        low_hits += 1
+                        low_chs.add(ci)
+                if cap_hits >= 2 and low_hits >= 2 and len(cap_chs | low_chs) >= 2:
+                    clusters.append(
+                        DriftCluster(
+                            source=gram,
+                            total_hits=n_occ,
+                            competing_targets=(
+                                (top_word.capitalize(), cap_hits),
+                                (top_word.lower(), low_hits),
+                            ),
+                            paragraph_refs=tuple((ci, si) for ci, si, _ in occurrences),
+                        )
+                    )
 
     clusters.sort(key=lambda c: (-c.total_hits, c.source))
     return clusters[:max_clusters]
@@ -504,7 +539,19 @@ class ConsistencySweepService:
                     for src_key, canonical_tgt in drift_decisions.items():
                         if not source_matches_text(src_key, seg.source):
                             continue
-                        if _target_contains_term(seg.target, canonical_tgt, target_lang=self._tgt):
+                        stripped_canon = canonical_tgt.strip()
+                        core_canon = re.sub(r"^(?:the|a|an)\s+", "", stripped_canon, flags=re.I)
+                        if (
+                            self._tgt.lower().split("-", 1)[0] == "en"
+                            and core_canon
+                            and any(c.isupper() for c in core_canon)
+                        ):
+                            # Respect intentional capitalization (e.g. "King" vs "king").
+                            if re.search(rf"\b{re.escape(core_canon)}s?\b", seg.target):
+                                continue
+                        elif _target_contains_term(
+                            seg.target, canonical_tgt, target_lang=self._tgt
+                        ):
                             continue
                         drift_items.append(
                             (
