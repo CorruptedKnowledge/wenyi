@@ -194,6 +194,28 @@ def test_nextgen_pipeline_settings_persist_in_global_and_project_settings(monkey
     sweep_stage = next(s for s in wf["stages"] if s["id"] == "consistency_sweep")
     assert sweep_stage["enabled"] is True
 
+    monkeypatch.setattr(
+        current_context().repository,
+        "latest_workflow_job",
+        lambda _: {
+            "kind": "chapter_translation",
+            "status": "queued",
+            "params": {
+                "config_snapshot": {
+                    "pipeline": {
+                        "book_understanding": True,
+                        "polish": True,
+                        "consistency_sweep": True,
+                        "review": False,
+                        "review_autofix": False,
+                    }
+                }
+            },
+        },
+    )
+    chapter_wf = configuration.workflow("nextgen-wf")
+    assert "consistency_sweep" not in [s["id"] for s in chapter_wf["stages"]]
+
 
 @pytest.mark.parametrize(
     "strategy",
