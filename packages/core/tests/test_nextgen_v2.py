@@ -20,6 +20,7 @@ from wenyi_core.agents.book_bible import (
     _apply_spoiler_safe_gender_guard,
     _cluster_candidate_rows,
     mine_bible_candidates,
+    select_voice_excerpts,
 )
 from wenyi_core.agents.sparse_editor import SparseSemanticEditor
 from wenyi_core.config import Config
@@ -509,3 +510,193 @@ def test_pr30_review_regressions(tmp_path):
     res_docx = svc.run(store, chapter_indices=[0, 1], terms=[])
     assert res_docx.quotes_unified == 0
     assert store.load_chapter(1).text_segments[0].target == "Protected DOCX styled line."
+
+
+def test_batch_risk_catches_phantom_entity_pronoun_flip_and_oxen_allusion():
+    terms = [
+        GlossaryTerm(source="荆襄", target="Jingxiang", type="place"),
+        GlossaryTerm(source="南楚", target="Southern Chu", type="place"),
+    ]
+    sources = [
+        "若是王爷亲自领兵，便能稳守襄樊，护我南楚。",
+        "我看见一个青衣书生，披了玄色披风，看不清相貌，只看她的身材举止，我冲过去握着他的双手。",
+        "我听过你的诗：‘八百里分麾下炙，五十弦翻塞外声。’",
+        "大军稳守荆襄，保我南楚安宁。",
+    ]
+    drafts = [
+        "If Your Highness leads the army, we can hold Jingxiang firmly and shield Southern Chu.",
+        "I saw a scholar in a green robe, a cloak covering him so his face was hidden, yet from her figure alone I seized her hands.",
+        'I have heard your poem: "Eight hundred oxen roasted, shared among my men;\nfifty strings play frontier songs."',
+        "The army held Jingxiang firmly and kept Southern Chu at peace.",
+    ]
+    report = assess_batch_risk(
+        sources,
+        drafts,
+        source_lang="zh",
+        target_lang="en",
+        glossary_terms=terms,
+    )
+    by_idx = {(a.index, a.code) for a in report.alerts}
+    assert (0, "phantom_entity") in by_idx
+    assert (1, "pronoun_consistency") in by_idx
+    assert (2, "allusion") in by_idx
+    # Paragraph 3 genuinely contains 荆襄 in source, so no false phantom_entity alert.
+    assert (3, "phantom_entity") not in by_idx
+    assert report.should_escalate is True
+
+
+def test_book_bible_captures_divergent_titles_and_compiles_voice_exemplars():
+    cfg = Config(source_lang="zh", target_lang="en", llm=LLMConfig(preset="fake"))
+    probe_call = 0
+    seen_adjudicate_user = ""
+
+    def handler(messages, operation, json_mode):
+        nonlocal probe_call, seen_adjudicate_user
+        sys_msg = messages[0]["content"]
+        user_msg = messages[-1]["content"]
+        if "terminology prober" in sys_msg:
+            probe_call += 1
+            if probe_call == 1:
+                return json.dumps({"renderings": {"南楚": "Southern Chu", "国主": "the sovereign"}})
+            return json.dumps({"renderings": {"南楚": "Southern Chu", "国主": "the king"}})
+        if "Book Bible" in sys_msg:
+            seen_adjudicate_user = user_msg
+            return json.dumps(
+                {
+                    "terms": [{"source": "南楚", "target": "Southern Chu", "type": "place"}],
+                    "conventions": ["Render 国主 consistently as 'the sovereign'."],
+                }
+            )
+        if "voice calibration" in sys_msg:
+            return json.dumps(
+                {
+                    "exemplars": {
+                        "0": "Autumn rain pattered against the eaves of Mingyue Tower.",
+                        "1": '"Wait a moment," he said with a wry smile.',
+                    }
+                }
+            )
+        return "{}"
+
+    fake = FakeClient(handler)
+    agent = BookBibleAgent(fake, cfg)
+    corpus = "南楚国主微恙。南楚国主召见群臣。国主问政。国主叹息。南楚朝野震动。国主点头。"
+    res = agent.compile_bible(["南楚 and 国主 meet at court."], corpus)
+    assert "Divergent recurring titles" in seen_adjudicate_user
+    assert "国主" in seen_adjudicate_user
+    assert dict(res.divergent_titles)["国主"] == ("the sovereign", "the king")
+    assert all(t.source != "国主" for t in res.terms)
+
+    # Tiny stub text yields no excerpts; substantial corpus yields narration + dialogue exemplars.
+    assert select_voice_excerpts("短句。\n又一句。", source_lang="zh") == []
+    rich_corpus = "\n".join(
+        [
+            "显德十六年秋，细雨打在明月楼的飞檐上，街市间却依旧车水马龙，往来文士议论着今科恩科的金榜题名与朝中局势，气氛既热闹又暗藏机锋。",
+            "他放下折扇，微微笑道：“阁下此言差矣，若我南楚一味退让，强敌岂会因此止步？与其坐以待毙，不如先发制人，方能为社稷争得数十年喘息之机。”",
+            "夜深人静之时，我独自站在廊下望着一弯冷月，想起白天宴席上的唇枪舌剑，只觉得人心难测，步步皆是险棋，稍有不慎便会万劫不复。",
+        ]
+    )
+    excerpts = select_voice_excerpts(rich_corpus, source_lang="zh")
+    assert len(excerpts) == 3
+    exemplars = agent.compile_voice_exemplars(
+        excerpts[:2],
+        terms=res.terms,
+        conventions=res.conventions,
+    )
+    assert len(exemplars) == 2
+    assert fake.calls[-1]["thinking_boost"] == 1
+
+
+def test_consistency_sweep_filters_function_noise_and_patches_confirmed_title_drift(tmp_path):
+    from wenyi_core.storage.file import FileStorage
+
+    store = FileStorage(str(tmp_path), create=True)
+    ch0 = Chapter(
+        index=0,
+        title="Ch 0",
+        segments=[
+            Segment(
+                index=0, source="国主已经下旨。", target="The sovereign already issued a decree."
+            ),
+            Segment(index=1, source="国主已经召见。", target="The sovereign already summoned him."),
+            Segment(
+                index=2, source="国主问政。", target="The sovereign asked about state affairs."
+            ),
+            Segment(
+                index=3, source="普通叙述甲。", target="Ordinary narration alpha continues here."
+            ),
+            Segment(
+                index=4, source="普通叙述乙。", target="Ordinary narration beta continues here."
+            ),
+        ],
+    )
+    ch1 = Chapter(
+        index=1,
+        title="Ch 1",
+        segments=[
+            Segment(
+                index=0, source="国主已经回宫。", target="The king once returned to the palace."
+            ),
+            Segment(index=1, source="国主已经赏赐。", target="The king once bestowed rewards."),
+            Segment(index=2, source="国主大喜。", target="The king was overjoyed."),
+            Segment(
+                index=3, source="普通叙述丙。", target="Ordinary narration gamma continues here."
+            ),
+            Segment(
+                index=4, source="普通叙述丁。", target="Ordinary narration delta continues here."
+            ),
+        ],
+    )
+    store.save_chapter(ch0)
+    store.save_chapter(ch1)
+
+    clusters = detect_mid_frequency_drift(
+        [ch0, ch1],
+        source_lang="zh",
+        target_lang="en",
+        existing_glossary_sources=set(),
+        extra_watch_sources={"国主": ("the sovereign", "the king")},
+    )
+    cluster_sources = {c.source for c in clusters}
+    assert "国主" in cluster_sources
+    # Chinese adverb noise must be ignored.
+    assert "已经" not in cluster_sources
+
+    def handler(messages, operation, json_mode):
+        sys_msg = messages[0]["content"]
+        if "book consistency editor" in sys_msg:
+            return json.dumps({"decisions": {"国主": "the sovereign"}})
+        return json.dumps(
+            {
+                "patches": [
+                    {
+                        "index": 0,
+                        "reason": "title_consistency",
+                        "text": "The sovereign once returned to the palace.",
+                    },
+                    {
+                        "index": 1,
+                        "reason": "title_consistency",
+                        "text": "The sovereign once bestowed rewards.",
+                    },
+                    {
+                        "index": 2,
+                        "reason": "title_consistency",
+                        "text": "The sovereign was overjoyed.",
+                    },
+                ]
+            }
+        )
+
+    cfg = Config(source_lang="zh", target_lang="en", llm=LLMConfig(preset="fake"))
+    editor = SparseSemanticEditor(FakeClient(handler), cfg)
+    svc = ConsistencySweepService(editor, source_lang="zh", target_lang="en")
+    res = svc.run(
+        store,
+        chapter_indices=[0, 1],
+        terms=[],
+        divergent_titles={"国主": ("the sovereign", "the king")},
+    )
+    assert res.drift_patches_applied == 3
+    ch1_saved = store.load_chapter(1)
+    assert all("sovereign" in (s.target or "") for s in ch1_saved.text_segments[:3])
