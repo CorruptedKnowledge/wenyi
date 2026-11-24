@@ -381,6 +381,18 @@ def test_glossary_generic_target_words_returns_stable_cached_frozenset():
     assert _is_generic.cache_info().hits >= 1
 
 
+def test_assess_batch_risk_handles_shorter_drafts_without_index_error():
+    terms = [GlossaryTerm(source="黑石城", target="Blackstone City", type="place")]
+    report = assess_batch_risk(
+        ["黑石城的城门紧闭。", "第二段没有对应译文。"],
+        ["The gates of the dark fortress were shut."],
+        source_lang="zh",
+        target_lang="en",
+        glossary_terms=terms,
+    )
+    assert (0, "glossary_miss") in _codes(report)
+
+
 # --- batch_risk: batch-level pre-filter equivalence ----------------------------------------
 
 

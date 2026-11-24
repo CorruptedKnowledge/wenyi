@@ -675,8 +675,8 @@ def assess_batch_risk(
     dialogue_paras = 0
     high_sev_count = 0
 
-    for idx, src in enumerate(para_srcs):
-        if not src or not para_drfs[idx]:
+    for idx, (src, drf) in enumerate(zip(para_srcs, para_drfs)):
+        if not src or not drf:
             continue
         clean_drf = clean_drfs[idx]
         norm_src = norm_srcs[idx]
