@@ -116,8 +116,14 @@ def test_phantom_target_hit_rules():
         lowercase_words=frozenset({"rowan"}),
     )
     assert "café" in _lowercase_words(["a cafe\u0301 on the corner"])
-    # Multi-word targets, honorific prefixes, apostrophe variants, lowercase particles, and articles.
+    # Multi-word targets (including across line breaks), honorific prefixes, apostrophe variants,
+    # lowercase particles, and articles.
     assert _phantom_target_hit("Envoys from the Eastern Wu court.", "Eastern Wu", target_lang="en")
+    assert _phantom_target_hit("Envoys from Eastern\nWu arrived.", "Eastern Wu", target_lang="en")
+    assert _phantom_target_hit("Envoys from Eastern\r\nWu arrived.", "Eastern Wu", target_lang="en")
+    assert not _phantom_target_hit(
+        "Envoys from Eastern\nwu arrived.", "Eastern Wu", target_lang="en"
+    )
     assert _phantom_target_hit("The Duke of North smiled.", "the Duke of North", target_lang="en")
     assert not _phantom_target_hit("the eastern wu court", "Eastern Wu", target_lang="en")
     assert _phantom_target_hit("He met Mr. White at noon.", "White", target_lang="en")

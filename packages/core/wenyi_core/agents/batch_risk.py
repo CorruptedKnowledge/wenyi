@@ -335,7 +335,8 @@ def _phantom_target_hit(
         ambiguous = bool(_SINGLE_WORD_RE.fullmatch(form)) and (
             is_en_collision or folded in lowercase_words
         )
-        pat = re.compile(rf"(?<![^\W\d_]){re.escape(form)}(?![^\W\d_])")
+        form_pattern = r"\s+".join(re.escape(part) for part in form.split())
+        pat = re.compile(rf"(?<![^\W\d_]){form_pattern}(?![^\W\d_])")
         for m in pat.finditer(text):
             if not ambiguous or not _is_sentence_initial(text, m.start()):
                 return True
