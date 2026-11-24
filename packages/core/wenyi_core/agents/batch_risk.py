@@ -55,11 +55,11 @@ _JA_TANKA_QUOTE_RE = re.compile(
 # sentence/quote/ellipsis/paren/line start and uses a conservative heuristic exclusion list
 # for common non-conditional temporal/modal 不-compounds (also intentionally excluding
 # 不是…，就是 disjunctions). None of the spans may cross clause/quote/line boundaries.
-_ZH_COND_SPAN = r"[^，,。！？”」』’）\"；;：:\n]"
+_ZH_COND_SPAN = r"[^，,。！？”」』’）)\"'；;：:\n]"
 _ZH_CONDITIONAL_RE = re.compile(
     rf"(?:如果|要是|假如|倘若|只要|万一|萬一|一旦){_ZH_COND_SPAN}{{0,4}}不{_ZH_COND_SPAN}{{1,18}}[，,](?:就|便|则|則)"
     rf"|若不{_ZH_COND_SPAN}{{1,18}}[，,](?:就|便|则|則)"
-    rf"|(?:^|[。！？；;：:“「『‘（…\"\n])不"
+    rf"|(?:^|[。！？；;：:“「『‘（(…\"'\n])不"
     r"(?!到|等|久|管|论|論|仅|僅|但|过|過|禁|由|免|料|愧|顾|顧|待|及|必|用|需要|知|清楚|敢|会|會|可能|太|是|能因|代表|一会|一會|片刻|远|遠|得不|幸|多时|多時|多久|一时|一時|大一会|大一會|消|出|经意|經意|得已)"
     rf"{_ZH_COND_SPAN}{{2,18}}[，,]就"
     rf"|若非|如若不然|若是{_ZH_COND_SPAN}{{2,16}}[，,](?:便|就|则|則)"
