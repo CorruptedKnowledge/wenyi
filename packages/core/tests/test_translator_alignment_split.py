@@ -336,3 +336,95 @@ def test_retry_success_keeps_transcript_and_does_not_split(caplog):
     assert len(messages) == 1
     assert "attempt=1/2" in messages[0]
     assert not any("binary split" in m for m in messages)
+
+
+def test_single_paragraph_empty_leaf_recovers_via_corrective_followup(caplog):
+    """A single-paragraph leaf returning '' recovers via one corrective follow-up turn."""
+    secret = "SECRET_WATERMARK_SENTINEL"
+    sources = ["First paragraph.", "Second paragraph.", "Third paragraph.", secret]
+    recorded_messages: list[list[dict[str, str]]] = []
+
+    def handler(messages, tier, json_mode):
+        recorded_messages.append(list(messages))
+        if len(messages) > 2 and "non-empty string" in messages[-1]["content"]:
+            return json.dumps({"translations": ["Literal rendering"]}, ensure_ascii=False)
+        batch = _numbered_sources(messages[-1]["content"])
+        return json.dumps(
+            {"translations": ["" if s == secret else f"译:{s}" for s in batch]},
+            ensure_ascii=False,
+        )
+
+    translator = Translator(FakeClient(handler=handler), _config(align_retry_limit=1))
+    with caplog.at_level(logging.WARNING, logger="wenyi_core.agents.translator"):
+        result = translator.translate_batch(sources)
+
+    assert result == [
+        "译:First paragraph.",
+        "译:Second paragraph.",
+        "译:Third paragraph.",
+        "Literal rendering",
+    ]
+    # Follow-up must extend the exact leaf conversation prefix for KV-cache reuse.
+    follow_up = recorded_messages[-1]
+    leaf_initial = recorded_messages[-2]
+    assert follow_up[: len(leaf_initial)] == leaf_initial
+    assert follow_up[len(leaf_initial)]["role"] == "assistant"
+    assert follow_up[-1]["role"] == "user"
+    assert any("retrying with non-empty reminder" in r.getMessage() for r in caplog.records)
+    assert all(secret not in r.getMessage() for r in caplog.records)
+
+
+def test_single_paragraph_batch_empty_recovers_and_keeps_full_transcript():
+    """A 1-paragraph batch returning '' recovers in one follow-up and keeps the full transcript."""
+    calls = 0
+
+    def handler(messages, tier, json_mode):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return json.dumps({"translations": [""]})
+        assert len(messages) == 4
+        assert messages[2]["role"] == "assistant"
+        assert messages[3]["role"] == "user"
+        return json.dumps({"translations": ["Recovered."]})
+
+    translator = Translator(FakeClient(handler=handler), _config(align_retry_limit=1))
+    targets, turn, indices = translator.translate_batch_with_transcript(["Lone line."])
+
+    assert targets == ["Recovered."]
+    assert indices == [0]
+    assert calls == 2
+    assert turn is not None
+    assert [msg["role"] for msg in turn] == ["system", "user", "assistant", "user", "assistant"]
+
+
+@pytest.mark.parametrize(
+    "followup_payload",
+    [
+        json.dumps({"translations": [""]}),
+        json.dumps({"translations": [None]}),
+        json.dumps({"translations": []}),
+        "not json at all",
+    ],
+    ids=["blank", "null", "wrong_count", "invalid_json"],
+)
+def test_single_paragraph_empty_followup_still_rejects_bad_output(followup_payload):
+    """Persistent blank or malformed follow-up output must still raise AlignmentError."""
+
+    def handler(messages, tier, json_mode):
+        if len(messages) > 2:
+            return followup_payload
+        return json.dumps({"translations": [""]})
+
+    translator = Translator(FakeClient(handler=handler), _config(align_retry_limit=0))
+    with pytest.raises(AlignmentError, match="Single-paragraph fallback failed at paragraph 0"):
+        translator.translate_batch(["Source line."])
+
+
+def test_allow_empty_translations_skips_corrective_followup():
+    """MinerU allow_empty_translations accepts '' immediately without a follow-up call."""
+    client = FakeClient(handler=lambda *_: json.dumps({"translations": [""]}))
+    translator = Translator(client, _config(align_retry_limit=1))
+
+    assert translator.translate_batch(["OCR noise"], allow_empty_translations=True) == [""]
+    assert len(client.calls) == 1

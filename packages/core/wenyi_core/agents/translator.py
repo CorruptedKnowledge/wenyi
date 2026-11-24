@@ -288,22 +288,74 @@ class Translator(Agent):
             raise AlignmentError(
                 "Cannot parse the translation JSON returned by the model"
             ) from error
-        items = data.get("translations") if isinstance(data, dict) else data
-        if not isinstance(items, list):
-            raise AlignmentError("The model did not return a translation array")
-        if len(items) != n:
-            raise AlignmentError(
-                f"Translation count mismatch: expected {n} paragraphs, got {len(items)}"
-            )
-        if any(not isinstance(item, str) for item in items):
-            raise AlignmentError("The model returned a non-string translation")
+        items = self._extract_batch_items(data, n)
         if not allow_empty_translations and any(not item.strip() for item in items):
-            raise AlignmentError("The model returned an empty or non-string translation")
+            if n == 1:
+                items, raw, messages = self._recover_empty_single_paragraph(messages, raw)
+            else:
+                raise AlignmentError("The model returned an empty or non-string translation")
         turn = [
             *messages,
             {"role": "assistant", "content": raw},
         ]
         return items, turn
+
+    @staticmethod
+    def _extract_batch_items(data: object, expected_count: int) -> list[str]:
+        items = data.get("translations") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            raise AlignmentError("The model did not return a translation array")
+        if len(items) != expected_count:
+            raise AlignmentError(
+                f"Translation count mismatch: expected {expected_count} paragraphs, got {len(items)}"
+            )
+        if any(not isinstance(item, str) for item in items):
+            raise AlignmentError("The model returned a non-string translation")
+        return items
+
+    def _recover_empty_single_paragraph(
+        self,
+        messages: Messages,
+        raw: str,
+    ) -> tuple[list[str], str, Messages]:
+        """Retry an isolated blank translation once on the same conversation prefix.
+
+        Models occasionally strip stray boilerplate, scraper footers, or fragments to ``""``
+        when translating in full book context. A single corrective follow-up turn preserves
+        KV-cache reuse and recovers a faithful literal rendering while still rejecting
+        persistent empty responses.
+        """
+        _LOGGER.warning(
+            "Single-paragraph translation returned empty string; retrying with non-empty reminder"
+        )
+        follow_up: Messages = [
+            *messages,
+            {"role": "assistant", "content": raw},
+            {
+                "role": "user",
+                "content": (
+                    'Your previous response returned an empty string "". Every non-empty source '
+                    'paragraph must receive a non-empty string in "translations". Even if the '
+                    "paragraph looks like a fragment, watermark, boilerplate, or noise, translate "
+                    "it literally or preserve it as-is. Return only JSON: "
+                    '{"translations":["..."]} with 1 non-empty string.'
+                ),
+            },
+        ]
+        try:
+            data, retry_raw = self._complete_json_turn(follow_up, operation="translation.body")
+        except TruncatedResponseError as error:
+            raise AlignmentError(
+                "The translation response reached the output token limit"
+            ) from error
+        except JsonParseError as error:
+            raise AlignmentError(
+                "Cannot parse the translation JSON returned by the model"
+            ) from error
+        items = self._extract_batch_items(data, 1)
+        if not items[0].strip():
+            raise AlignmentError("The model returned an empty or non-string translation")
+        return items, retry_raw, follow_up
 
     def _translate_one(
         self,
