@@ -15,7 +15,7 @@ import re
 from ..alignment.objects import marked_sources
 from ..glossary.store import GlossaryStore
 from ..i18n import genres
-from ..llm.json_parser import JsonParseError
+from ..llm.json_parser import JsonParseError, UnsafeJsonRepairError
 from ..llm.preflight import fit_prompt_to_context_window
 from ..llm.retrying import TruncatedResponseError
 from ..models.glossary import TYPE_NAVIGATION, GlossaryTerm
@@ -268,7 +268,9 @@ class Translator(Agent):
         # Transient provider errors are retried only by the transport. Only JSON protocol errors in
         # successful responses enter alignment recovery, avoiding duplicate retries for 401/403/5xx errors.
         try:
-            data, raw = self._complete_json_turn(messages, operation="translation.body")
+            data, raw = self._complete_json_turn(
+                messages, operation="translation.body", require_complete_payload=True
+            )
             if tools is not None and isinstance(data, dict) and set(data) == {"read_note"}:
                 try:
                     page = tools.call("read_note", data["read_note"])
@@ -284,10 +286,30 @@ class Translator(Agent):
                         },
                     ]
                 )
-                data, raw = self._complete_json_turn(messages, operation="translation.body")
+                data, raw = self._complete_json_turn(
+                    messages, operation="translation.body", require_complete_payload=True
+                )
         except TruncatedResponseError as error:
             raise AlignmentError(
                 "The translation response reached the output token limit"
+            ) from error
+        except UnsafeJsonRepairError as error:
+            # Repair can fold trailing reasoning or a second attempt into a translation string
+            # while still producing the expected count, so only intact JSON may become a target.
+            if n == 1:
+                _LOGGER.warning(
+                    "Single-paragraph translation JSON needed structural repair; retrying in "
+                    "plain-text mode"
+                )
+                plain = self._translate_one_plain_text(
+                    sources[0],
+                    glossary_terms,
+                    style,
+                    (annotation_contexts or [[]])[0],
+                )
+                return [plain], None
+            raise AlignmentError(
+                "The translation JSON returned by the model needed structural repair"
             ) from error
         except JsonParseError as error:
             raise AlignmentError(
@@ -362,7 +384,13 @@ class Translator(Agent):
             },
         ]
         try:
-            data, retry_raw = self._complete_json_turn(follow_up, operation="translation.body")
+            data, retry_raw = self._complete_json_turn(
+                follow_up, operation="translation.body", require_complete_payload=True
+            )
+        except UnsafeJsonRepairError as error:
+            raise _EmptyTranslationError(
+                "The empty-translation follow-up needed structural JSON repair"
+            ) from error
         except TruncatedResponseError as error:
             raise AlignmentError(
                 "The translation response reached the output token limit"

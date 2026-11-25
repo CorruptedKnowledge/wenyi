@@ -157,6 +157,51 @@ class TestTranslatorAlignment(unittest.TestCase):
 
         self.assertEqual(len(client.calls), 1)
 
+    def test_structurally_repaired_batch_is_retried_instead_of_saved(self):
+        """A malformed reply whose repair happens to match the count must not leak into targets."""
+        leaked = (
+            '{"translations":["A","B"</translations] }</translations>}'
+            "Wait, the output format requires JSON object only. Let me produce the correct JSON.{"
+        )
+        # json-repair turns this reply into three strings, matching the three sources.
+        replies = [leaked, json.dumps({"translations": ["译0", "译1", "译2"]}, ensure_ascii=False)]
+
+        def handler(messages, tier, json_mode):
+            del messages, tier, json_mode
+            return replies.pop(0)
+
+        client = FakeClient(handler=handler)
+        translator = Translator(client, self._config())
+
+        out = translator.translate_batch(["あ", "い", "う"])
+
+        self.assertEqual(out, ["译0", "译1", "译2"])
+        self.assertEqual(len(client.calls), 2)
+
+    def test_structurally_repaired_single_paragraph_uses_plain_text_mode(self):
+        modes: list[bool] = []
+
+        def handler(messages, tier, json_mode):
+            del messages, tier
+            modes.append(json_mode)
+            if json_mode:
+                return '{"translations":["译文</translations>}Wait, JSON only.{'
+            return "译文"
+
+        translator = Translator(FakeClient(handler=handler), self._config())
+
+        self.assertEqual(translator.translate_batch(["あ"]), ["译文"])
+        self.assertEqual(modes, [True, False])
+
+    def test_boundary_only_repair_is_still_accepted(self):
+        client = FakeClient(
+            handler=lambda messages, tier, json_mode: '```json\n{"translations":["译"]}\n```'
+        )
+        translator = Translator(client, self._config())
+
+        self.assertEqual(translator.translate_batch(["あ"]), ["译"])
+        self.assertEqual(len(client.calls), 1)
+
 
 class TestEmptyTargetResume(unittest.TestCase):
     def test_blank_target_counts_as_translated_for_resume_batches(self):
