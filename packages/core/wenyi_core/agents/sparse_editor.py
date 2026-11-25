@@ -184,6 +184,10 @@ class SparseSemanticEditor(Agent):
             + (f"{pair_note}\n" if pair_note else "")
             + f"Language & formatting rules:\n{lang_rules}\n{punct_rule}\n"
             "Preserve every protected marker (e.g. 〘object:...〙 or ⟦...⟧) verbatim if present.\n"
+            "Reasoning efficiency: Read every paragraph against its source carefully, but in your "
+            "internal reasoning NEVER enumerate, summarize, or check off clean paragraphs one by one. "
+            "Note ONLY paragraphs with a suspected defect or a [Pre-screen alerts] item briefly, "
+            "verify them, and output the JSON immediately.\n"
             'Return ONLY JSON: {"patches": [{"index": 0, "reason": "short_tag", "text": "corrected paragraph"}]}. '
             'If every paragraph is faithful and natural, return {"patches": []}.'
         )

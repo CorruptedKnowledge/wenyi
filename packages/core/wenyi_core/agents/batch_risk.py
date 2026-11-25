@@ -36,11 +36,13 @@ _PAREN_GLOSS_RE = re.compile(r"\((?:lit\.|literally|i\.e\.|meaning|a |the )?[^()
 _HALFWIDTH_IN_CJK_RE = re.compile(r"[\u4e00-\u9fff][,?!;:][\u4e00-\u9fff]")
 
 # Embedded classical/literary poem/lyric signals inside a prose paragraph.
+# Exclude common prose dialogue verbs ending in 吟道 (沉吟道 "mused", 笑吟吟道 "said smilingly",
+# 呻吟道 "groaned") while still catching standalone 吟道 / 轻声吟道 / 低声吟道 verse recitations.
 _EMBEDDED_ZH_VERSE_RE = re.compile(
     r"(?:《(?:破阵子|破陣子|鹊桥仙|鵲橋仙|西江月|沁园春|沁園春|水调歌头|水調歌頭|满江红|滿江紅|"
     r"念奴娇|念奴嬌|虞美人|菩萨蛮|菩薩蠻|临江仙|臨江仙|蝶恋花|蝶戀花|思帝乡|思帝鄉|清平乐|清平樂|"
     r"声声慢|聲聲慢|如梦令|如夢令|浪淘沙|江城子|青玉案|定风波|定風波)》|"
-    r"(?:诗曰|詩曰|词曰|詞曰|偈曰|赞曰|讚曰|歌曰|有诗为证|有詩為證|吟道|唱道)[：:，,]?\s*[「『“\"])"
+    r"(?:诗曰|詩曰|词曰|詞曰|偈曰|赞曰|讚曰|歌曰|有诗为证|有詩為證|(?<![沉吟呻])吟道|唱道)[：:，,]?\s*[「『“\"])"
 )
 _EMBEDDED_JA_VERSE_RE = re.compile(
     r"(?:短歌|俳句|和歌|詠んだ|歌った|記されていた)[^「『]{0,24}[「『][^」』]{12,60}[」』]"
@@ -53,35 +55,47 @@ _JA_TANKA_QUOTE_RE = re.compile(
 # Explicit conditional introducers (如果/要是/假如/倘若/只要/万一/一旦 + optional short subject,
 # or 若不) always fire without the bare-不 exclusion list. Bare 不…，就 fires only at a
 # sentence/quote/ellipsis/paren/line start and uses a conservative heuristic exclusion list
-# for common non-conditional temporal/modal 不-compounds (also intentionally excluding
-# 不是…，就是 disjunctions). None of the spans may cross clause/quote/line boundaries.
+# for common non-conditional temporal/modal/concessive 不-compounds (also intentionally
+# excluding 不是…，就是 disjunctions and 不说/不要说…，就算/就连 concessives). None of the
+# spans may cross clause/quote/line boundaries.
 _ZH_COND_SPAN = r"[^，,。！？”」』’）)\"'；;：:\n]"
 _ZH_CONDITIONAL_RE = re.compile(
     rf"(?:如果|要是|假如|倘若|只要|万一|萬一|一旦){_ZH_COND_SPAN}{{0,4}}不{_ZH_COND_SPAN}{{1,18}}[，,](?:就|便|则|則)"
     rf"|若不{_ZH_COND_SPAN}{{1,18}}[，,](?:就|便|则|則)"
     rf"|(?:^|[。！？；;：:“「『‘（(…\"'\n])不"
-    r"(?!到|等|久|管|论|論|仅|僅|但|过|過|禁|由|免|料|愧|顾|顧|待|及|必|用|需要|知|清楚|敢|会|會|可能|太|是|能因|代表|一会|一會|片刻|远|遠|得不|幸|多时|多時|多久|一时|一時|大一会|大一會|消|出|经意|經意|得已)"
+    r"(?!到|等|久|管|论|論|仅|僅|但|过|過|禁|由|免|料|愧|顾|顧|待|及|必|用|需要|知|清楚|敢|会|會|可能|太|是|能因|代表|一会|一會|片刻|远|遠|得不|幸|多时|多時|多久|一时|一時|大一会|大一會|消|出|经意|經意|得已|说|說|要说|要說|提|止|单|單|光|只)"
     rf"{_ZH_COND_SPAN}{{2,18}}[，,]就"
     rf"|若非|如若不然|若是{_ZH_COND_SPAN}{{2,16}}[，,](?:便|就|则|則)"
 )
 _EN_CONDITIONAL_MARKERS = re.compile(
-    r"\b(?:if|unless|otherwise|or else|then|either|were it not)\b", re.I
+    r"\b(?:if|unless|otherwise|or else|then|either|were it not|as long as|so long as|"
+    r"provided|providing|should|once|whenever|without|but for|had it not)\b",
+    re.I,
 )
 
 _ZH_DELAYED_CAI_RE = re.compile(
     r"(?:良久|半晌|许久|許久|过了许久|過了許久|过了半晌)[，,]?[^。！？]{0,16}才"
 )
-_EN_DELAYED_MARKERS = re.compile(r"\b(?:only|until|at last|finally|before)\b", re.I)
+_EN_DELAYED_MARKERS = re.compile(
+    r"\b(?:only|until|at last|finally|before|later|after a(?:\s+long)?\s+while|"
+    r"eventually|afterward|afterwards|long after)\b",
+    re.I,
+)
 
 _ZH_NEG_IMPERATIVE_RE = re.compile(
     r"(?:莫|切莫|休|切勿)[^，。！？]{1,16}(?:只管|只顾|只顧|尽管|儘管)"
 )
 _EN_AFFIRM_IMPERATIVE_TRAP = re.compile(r"\b(?:just\s+(?:keep\s+)?|simply\s+keep)\b", re.I)
 
-_ZH_ROYAL_GU_COMPOUNDS = re.compile(r"孤[儿兒身城单單独獨立零苦舟寂影芳鸿鴻雁陋陋癖军軍立]")
+_ZH_ROYAL_GU_COMPOUNDS = re.compile(
+    r"孤[儿兒女身城单單独獨立零苦舟寂影芳鸿鴻雁陋癖军軍星胆膽傲高注魂鬼寡家掌本灯燈帆岛島绝絕冷]"
+    r"|(?:天煞|独|獨|遗|遺|托|託|恤|抚|撫|矜)孤"
+)
 _EN_LONE_TRAP = re.compile(r"\b(?:the\s+)?lone(?:\s+one)?\b", re.I)
 
-_ZH_CLASSICAL_GU_RE = re.compile(r"[，,；;。]\s*故[\u4e00-\u9fff]{1,6}[之矣也焉。，]")
+_ZH_CLASSICAL_GU_RE = re.compile(
+    r"[，,；;。]\s*故(?![意事乡鄉人友居土地国國都旧舊纸紙宫宮障态態步辙轍智])[\u4e00-\u9fff]{1,6}[之矣也焉。，]"
+)
 _EN_DELIBERATELY_TRAP = re.compile(r"\b(?:deliberately|on purpose|intentionally)\b", re.I)
 
 _EN_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -96,13 +110,24 @@ _ZH_QUOTED_SPAN_RE = re.compile(r"“[^”]*”|「[^」]*」|『[^』]*』")
 
 _ZH_AT_LEAST_RE = re.compile(r"至少")
 _EN_AT_MOST_TRAP = re.compile(r"\b(?:no\s+more\s+than|at\s+most)\b", re.I)
-_ZH_INLAW_KINSHIP_RE = re.compile(r"(?:大姨|二姨|三姨|小姨|大舅子|小舅子)")
+_ZH_INLAW_KINSHIP_RE = re.compile(r"(?:(?:大姨|二姨|三姨|小姨)(?!妈|媽)|大舅子|小舅子)")
 _EN_AUNT_UNCLE_TRAP = re.compile(r"\b(?:aunts?|uncles?)\b", re.I)
 _EN_CALQUE_SENTINEL_RE = re.compile(
-    r"\b(?:long\s+live\s+the\s+ten\s+thousand|ten\s+thousand\s+years|the\s+sir)\b",
+    r"\b(?:long\s+live\s+the\s+ten\s+thousand|the\s+sir)\b",
     re.I,
 )
-_ZH_CLASSICAL_PARTICLES_RE = re.compile(r"[之乎者也矣焉哉岂豈孰乃遂故既若非莫勿]")
+_EN_TEN_THOUSAND_YEARS_RE = re.compile(r"\bten\s+thousand\s+years\b", re.I)
+_ZH_WANSUI_RE = re.compile(r"万岁|萬歲")
+# Strictly classical/literary particles (excluding ultra-common modern Mandarin 之/也/者/非/既/故/若/莫).
+_ZH_CLASSICAL_PARTICLES_RE = re.compile(r"[乎矣焉哉岂豈孰乃遂毋勿兮耶欤歟弗吾汝尔爾厥]")
+
+# Pure Chinese numeral glossary names (e.g. 十一 -> Eleven) should not match inside chapter
+# numbers (第七十一章), dates (十一月), times (十一点), or longer numerals (七十一).
+_ZH_NUMERAL_ONLY_RE = re.compile(r"^[零〇一二三四五六七八九十百千万萬亿億两兩]+$")
+_ZH_NUMERAL_LEFT_BOUNDARY = frozenset("第零〇一二三四五六七八九十百千万萬亿億两兩")
+_ZH_NUMERAL_RIGHT_BOUNDARY = frozenset(
+    "零〇一二三四五六七八九十百千万萬亿億章回节節卷集篇幕年月日天时時分秒点點岁歲个個名位件条條次遍倍成斤两兩米尺丈里元块塊钱錢"
+)
 
 
 @dataclass(frozen=True)
@@ -564,6 +589,28 @@ def has_embedded_verse(source: str, *, source_lang: str) -> bool:
     return False
 
 
+def _glossary_source_matches(term_source: str, norm_text: str, *, src_base: str) -> bool:
+    """Match ``term_source`` in ``norm_text``, guarding pure CJK numeral names against headings/counts."""
+    if not source_matches_normalized(term_source, norm_text):
+        return False
+    if src_base != "zh":
+        return True
+    key = normalize_match_text(term_source).strip()
+    if not key or not _ZH_NUMERAL_ONLY_RE.fullmatch(key):
+        return True
+    start = 0
+    while True:
+        pos = norm_text.find(key, start)
+        if pos == -1:
+            return False
+        left_ok = pos == 0 or norm_text[pos - 1] not in _ZH_NUMERAL_LEFT_BOUNDARY
+        end = pos + len(key)
+        right_ok = end >= len(norm_text) or norm_text[end] not in _ZH_NUMERAL_RIGHT_BOUNDARY
+        if left_ok and right_ok:
+            return True
+        start = pos + 1
+
+
 def assess_batch_risk(
     sources: Sequence[str],
     drafts: Sequence[str],
@@ -675,11 +722,15 @@ def assess_batch_risk(
     unlineated_couplets: list[int] = []
     classical_dense_paras = 0
     dialogue_paras = 0
-    high_sev_count = 0
+    non_empty_paras = 0
+    non_glossary_high_paras = 0
+    glossary_miss_paras = 0
+    glossary_variant_drift_paras = 0
 
     for idx, (src, drf) in enumerate(zip(para_srcs, para_drfs)):
         if not src or not drf:
             continue
+        non_empty_paras += 1
         clean_drf = clean_drfs[idx]
         norm_src = norm_srcs[idx]
         norm_drf = norm_drfs[idx]
@@ -768,7 +819,7 @@ def assess_batch_risk(
 
         # 5. Glossary canonical miss (cap at 1 alert per paragraph to avoid noise)
         for term in miss_candidates:
-            if not source_matches_normalized(term.source, norm_src):
+            if not _glossary_source_matches(term.source, norm_src, src_base=src_base):
                 continue
             if _target_contains_term(
                 clean_drf,
@@ -782,7 +833,7 @@ def assess_batch_risk(
             if any(
                 other.source != term.source
                 and term.source in other.source
-                and source_matches_normalized(other.source, norm_src)
+                and _glossary_source_matches(other.source, norm_src, src_base=src_base)
                 and _target_contains_term(
                     clean_drf,
                     other.target,
@@ -929,7 +980,9 @@ def assess_batch_risk(
                         high_severity=True,
                     )
                 )
-            if _EN_CALQUE_SENTINEL_RE.search(clean_drf):
+            if _EN_CALQUE_SENTINEL_RE.search(clean_drf) or (
+                _ZH_WANSUI_RE.search(src) and _EN_TEN_THOUSAND_YEARS_RE.search(clean_drf)
+            ):
                 alerts.append(
                     ParagraphAlert(
                         idx,
@@ -943,8 +996,16 @@ def assess_batch_risk(
 
         if any(q in src for q in ('"', "“", "「", "『")):
             dialogue_paras += 1
-        if any(a.high_severity for a in alerts[para_alerts_before:]):
-            high_sev_count += 1
+        para_alerts = alerts[para_alerts_before:]
+        if any(a.high_severity and a.code != "glossary_miss" for a in para_alerts):
+            non_glossary_high_paras += 1
+        if any(a.code == "glossary_miss" for a in para_alerts):
+            glossary_miss_paras += 1
+            if any(
+                a.code == "glossary_miss" and "(known variant drift detected)" in a.detail
+                for a in para_alerts
+            ):
+                glossary_variant_drift_paras += 1
 
     if unlineated_couplets:
         alerts.append(
@@ -956,13 +1017,23 @@ def assess_batch_risk(
             )
         )
 
-    # Escalation rule: escalate ONLY when concrete semantic/glossary/omission/embedded-verse
-    # anomalies fire OR the batch is unusually dense in classical/literary logic + dialogue.
+    # Escalation rule: escalate on concrete semantic/omission/phantom/script/verse anomalies,
+    # known glossary variant drift, dense glossary misses (1+ on small batches <=20 paras,
+    # 3+ on large batches where a single routine miss is already flagged in the prompt alert
+    # without paying high thinking across 100+ clean paragraphs), or dense classical dialogue.
+    glossary_escalate_threshold = 1 if non_empty_paras <= 20 else 3
     should_escalate = False
-    if high_sev_count >= 1:
+    if non_glossary_high_paras >= 1:
         should_escalate = True
-        reasons.append(f"high_sev_alerts:{high_sev_count}")
-    elif classical_dense_paras >= 3 and dialogue_paras >= 3:
+        reasons.append(f"high_sev_alerts:{non_glossary_high_paras + glossary_miss_paras}")
+    elif glossary_variant_drift_paras >= 1 or glossary_miss_paras >= glossary_escalate_threshold:
+        should_escalate = True
+        reasons.append(f"high_sev_alerts:{glossary_miss_paras}")
+    elif (
+        classical_dense_paras >= 3
+        and dialogue_paras >= 3
+        and classical_dense_paras * 10 >= non_empty_paras
+    ):
         should_escalate = True
         reasons.append(f"classical_debate:{classical_dense_paras}")
 

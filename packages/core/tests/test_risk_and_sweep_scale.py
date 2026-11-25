@@ -562,6 +562,172 @@ def test_assess_batch_risk_keeps_hits_at_full_book_scale():
     assert report.should_escalate is True
 
 
+def test_embedded_verse_excludes_prose_yin_dao_dialogue_tags_but_keeps_recitations():
+    from wenyi_core.agents.batch_risk import has_embedded_verse
+
+    # Prose dialogue verbs ending in 吟道 must never trigger embedded_verse.
+    for prose in (
+        "夏洛特沉吟道：“难道是他无意中走入了迷失地带？”",
+        "女仆小姐此时笑吟吟道：“秦小姐难道又忘记了？”",
+        "伤员痛苦地呻吟道：“别碰我的伤口。”",
+    ):
+        assert has_embedded_verse(prose, source_lang="zh") is False
+
+    # Genuine verse recitations still trigger embedded_verse.
+    for verse in (
+        "林远来到青云楼前，吟道：“大漠孤烟直，长河落日圆。”",
+        "他情不自禁便轻声吟道：“含吐缃缥之上，翩跹樽俎之侧……”",
+        "只听见那青年低声吟道：“别来春半，触目柔肠断。砌下落梅如雪乱。”",
+    ):
+        assert has_embedded_verse(verse, source_lang="zh") is True
+
+
+def test_zh_numeral_glossary_name_ignores_chapter_headings_and_counts():
+    terms = [GlossaryTerm(source="十一", target="Eleven", type="person")]
+    sources = [
+        "第七十一章 我要做英雄",
+        "第十一章 第一晚",
+        "十一月十一日十一点，他买回十一个苹果。",
+        "十一笑了笑，推门走了进来。",
+    ]
+    drafts = [
+        "Chapter 71: I Want to Be a Hero",
+        "Chapter 11: The First Night",
+        "At eleven o'clock on November 11, he bought eleven apples.",
+        "Shi Yi smiled and pushed the door open.",
+    ]
+    report = assess_batch_risk(
+        sources, drafts, source_lang="zh", target_lang="en", glossary_terms=terms
+    )
+    assert _codes(report) == {(3, "glossary_miss")}
+
+
+def test_zh_semantic_traps_reject_modern_prose_false_positives_and_keep_real_bugs():
+    # 1. Literal 万年 -> ten thousand years is NOT a calque; 万岁 -> ten thousand years IS.
+    clean_calque = assess_batch_risk(
+        ["他与她近万年的时光没有见面了。"],
+        ["He and she had not met for nearly ten thousand years."],
+        source_lang="zh",
+        target_lang="en",
+    )
+    assert not any(a.code == "calque_or_idiom" for a in clean_calque.alerts)
+
+    real_calque = assess_batch_risk(
+        ["群臣高呼吾皇万岁！"],
+        ["The ministers shouted, 'Ten thousand years!'"],
+        source_lang="zh",
+        target_lang="en",
+    )
+    assert any(a.code == "calque_or_idiom" for a in real_calque.alerts)
+
+    # 2. Concessive 不要说…就算 / 不说…就连 and valid 'as long as' conditional markers.
+    clean_cond = assess_batch_risk(
+        [
+            "不要说是小舢板了，就算是个水性好的人，也未必敢闯入。",
+            "不说是这样强大的伊凡了，就连卡莲也打不过他。",
+            "只要不是拆了这个城堡，就没有问题了。",
+        ],
+        [
+            "Never mind a small rowboat—even a strong swimmer might not dare enter.",
+            "Never mind an Ivan that powerful—even Karen couldn't beat him.",
+            "As long as you don't tear down this castle, there's no problem.",
+        ],
+        source_lang="zh",
+        target_lang="en",
+    )
+    assert not any(a.code == "conditional_logic" for a in clean_cond.alerts)
+
+    # 3. 孤星 / 孤胆, modern 故意, 大姨妈, and 'A long while later' do not false-positive.
+    clean_misc = assess_batch_risk(
+        [
+            "这不可能是天煞孤星，也不是孤胆英雄。",
+            "“我看你，故意制造事端，好让我们内讧？”",
+            "她比那位霸道的大姨妈也不差多少。",
+            "许久之后，他才缓缓地睁开了眼睛。",
+        ],
+        [
+            "This couldn't be the lone star of calamity, nor a lone hero.",
+            '"I see you are deliberately causing trouble to make us fight?"',
+            "She's no weaker than that overbearing Aunt Lucia.",
+            "A long while later, he slowly opened his eyes.",
+        ],
+        source_lang="zh",
+        target_lang="en",
+    )
+    assert not clean_misc.alerts
+    assert clean_misc.should_escalate is False
+
+
+def test_classical_debate_ignores_modern_prose_and_large_batch_glossary_escalation_scales():
+    # Modern prose rich in 之/也/者/故 must not trigger classical_debate.
+    modern_sources = [
+        "超脱者们并不是上下级的关系，这也是很多故事之中常见的事情，他说：“没错。”",
+        "超脱者和超脱者之间，也会遵循那些古老的故事，她笑道：“我明白。”",
+        "这些强者和普通人之间的故事，也并非表面那么简单，他叹道：“确实如此。”",
+    ] * 10
+    modern_drafts = ['Transcendents are not superiors or subordinates; he said, "Right."'] * len(
+        modern_sources
+    )
+    modern_report = assess_batch_risk(
+        modern_sources, modern_drafts, source_lang="zh", target_lang="en"
+    )
+    assert modern_report.should_escalate is False
+
+    # On large batches (>20 paras), a single unconfirmed glossary_miss stays in alerts
+    # without escalating the entire batch; known variant drift or 3+ misses still escalate.
+    terms = [GlossaryTerm(source="黑石城", target="Blackstone City", type="place")]
+    big_sources = [f"第{i}段：夜色渐深，街道安静下来。" for i in range(40)]
+    big_drafts = [f"Line {i}: night deepened and the street grew quiet." for i in range(40)]
+    big_sources[5] = "他们远眺黑石城的城墙。"
+    big_drafts[5] = "They gazed out at the walls of the dark fortress."
+
+    single_miss = assess_batch_risk(
+        big_sources, big_drafts, source_lang="zh", target_lang="en", glossary_terms=terms
+    )
+    assert (5, "glossary_miss") in _codes(single_miss)
+    assert single_miss.should_escalate is False
+
+    variant_miss = assess_batch_risk(
+        big_sources,
+        big_drafts,
+        source_lang="zh",
+        target_lang="en",
+        glossary_terms=terms,
+        variants_by_source={"黑石城": ("dark fortress",)},
+    )
+    assert (5, "glossary_miss") in _codes(variant_miss)
+    assert variant_miss.should_escalate is True
+
+    big_sources[15] = "黑石城的大门紧闭。"
+    big_drafts[15] = "The gates of the dark fortress were shut."
+    big_sources[25] = "黑石城的守军列阵。"
+    big_drafts[25] = "The garrison of the dark fortress formed ranks."
+    multi_miss = assess_batch_risk(
+        big_sources, big_drafts, source_lang="zh", target_lang="en", glossary_terms=terms
+    )
+    assert multi_miss.should_escalate is True
+
+
+def test_sparse_editor_system_prompt_includes_concise_reasoning_rule():
+    from wenyi_core.agents.sparse_editor import SparseSemanticEditor
+    from wenyi_core.config import Config
+    from wenyi_core.llm.configuration import LLMConfig
+    from wenyi_core.llm.providers.fake import FakeClient
+
+    seen_systems: list[str] = []
+
+    def handler(messages, op, json_mode):
+        seen_systems.append(messages[0]["content"])
+        return '{"patches": []}'
+
+    cfg = Config(source_lang="zh", target_lang="en", llm=LLMConfig(preset="fake"))
+    editor = SparseSemanticEditor(FakeClient(handler), cfg)
+    res = editor.edit_batch(["天气很好。"], ["The weather was fine."])
+    assert not res.failed
+    assert seen_systems
+    assert "NEVER enumerate, summarize, or check off clean paragraphs" in seen_systems[0]
+
+
 # --- consistency_sweep: drift mining ----------------------------------------------------
 
 
