@@ -40,7 +40,10 @@ _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)\n?```", re.DOTALL)
 def _fence_body(text: str) -> tuple[str, bool]:
     """Return ``text`` without a surrounding code fence and whether one was present."""
     fence = _FENCE_RE.fullmatch(text)
-    return (fence.group(1).strip(), True) if fence else (text, False)
+    # Several fenced blocks joined by commentary are not one fenced reply.
+    if fence is None or "```" in fence.group(1):
+        return text, False
+    return fence.group(1).strip(), True
 
 
 def _plain_text_target(text: str, source: str) -> str:

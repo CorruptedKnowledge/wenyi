@@ -2559,6 +2559,48 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
             with self.subTest(metadata_lang=metadata_lang, translate_title=translate_title):
                 self._check_localized_metadata_export(metadata_lang, translate_title, nav_title)
 
+    def test_doc_toc_role_nav_heading_is_captured(self):
+        from wenyi_core.ingest.epub_reader import read_epub
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_epub = os.path.join(tmp, "book.epub")
+            with zipfile.ZipFile(src_epub, "w") as zf:
+                zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+                zf.writestr(
+                    "META-INF/container.xml",
+                    '<?xml version="1.0"?><container version="1.0" '
+                    'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                    '<rootfiles><rootfile full-path="OEBPS/content.opf" '
+                    'media-type="application/oebps-package+xml"/></rootfiles></container>',
+                )
+                zf.writestr(
+                    "OEBPS/content.opf",
+                    '<?xml version="1.0" encoding="utf-8"?>'
+                    '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                    '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                    "<dc:title>书</dc:title><dc:language>zh</dc:language></metadata><manifest>"
+                    '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" '
+                    'properties="nav"/>'
+                    '<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>'
+                    '</manifest><spine><itemref idref="c1"/></spine></package>',
+                )
+                zf.writestr(
+                    "OEBPS/nav.xhtml",
+                    '<?xml version="1.0" encoding="utf-8"?>'
+                    '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>书</title></head>'
+                    '<body><nav role="doc-toc"><h1>目录</h1><ol>'
+                    '<li><a href="ch1.xhtml">第一章</a></li></ol></nav></body></html>',
+                )
+                zf.writestr(
+                    "OEBPS/ch1.xhtml",
+                    '<?xml version="1.0" encoding="utf-8"?>'
+                    '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>第一章</title></head>'
+                    "<body><h1>第一章</h1><p>正文。</p></body></html>",
+                )
+
+            doc = read_epub(src_epub, source_lang="zh", target_lang="en")
+            self.assertEqual(doc.meta["epub_nav_titles"], ["书", "目录"])
+
     def _check_localized_metadata_export(
         self, metadata_lang: str, translate_title: bool | str, nav_title: str
     ) -> None:

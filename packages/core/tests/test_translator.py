@@ -212,6 +212,7 @@ class TestTranslatorAlignment(unittest.TestCase):
             "empty object": "{}",
             "single-quoted list": "['译文']",
             "single-quoted object": "{'translation': '译文'}",
+            "two fences with commentary": "```\n译文\n```\nWait, JSON only.\n```\n译文\n```",
             "commentary with fence": 'Here is the translation:\n```json\n["译文"]\n```',
             "reasoning prefix": 'Wait, the output format requires JSON only {"translations":["译文"]}',
         }

@@ -428,7 +428,12 @@ fn toc_entries(
             // Non-NCX navigation is HTML even when it has an unusual suffix.
             let text = if html { text } else { decode(&bytes) };
             let dom = Dom::parse(&text);
-            if !toc_navs(&dom).is_empty() {
+            // Heading capture also accepts an ARIA `doc-toc` nav, matching the export rewrite.
+            if !toc_navs(&dom).is_empty()
+                || dom
+                    .tags(0)
+                    .any(|n| dom.name(n) == "nav" && dom.attr(n, "role") == Some("doc-toc"))
+            {
                 for node in nav_headings(&dom) {
                     let title = dom.text(node, " ", true);
                     if !title.is_empty() && !nav_titles.contains(&title) {
