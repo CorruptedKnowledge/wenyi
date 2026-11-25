@@ -1239,10 +1239,11 @@ fn rewrite_xml(
         if !p.title.is_empty() {
             if let Some(n) = field("title") {
                 if p.original_title.is_some() {
-                    // Only a saved translation is target-language text; the suffixed
-                    // fallback title keeps the source text.
-                    localized.insert(n.id());
-                    translate_opf_field(&text, n, &p.title, &p.lang, &mut edits);
+                    // Only a changed saved translation is target-language text; the suffixed
+                    // fallback title and an unchanged fallback keep the source text.
+                    if translate_opf_field(&text, n, &p.title, &p.lang, &mut edits) {
+                        localized.insert(n.id());
+                    }
                 } else {
                     edits.push(xml_contents(&text, n, &p.title));
                 }

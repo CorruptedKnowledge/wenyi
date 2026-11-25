@@ -2551,6 +2551,8 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
             ("", True, "Contents"),
             ("ja", True, "Contents"),
             ("", False, "Contents"),
+            # A title "translation" that fell back to the source text keeps the source tag.
+            ("", "unchanged", "Contents"),
             # Metadata already in the target language and an unchanged nav label stay as is.
             ("en", True, "目录"),
         ):
@@ -2558,7 +2560,7 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                 self._check_localized_metadata_export(metadata_lang, translate_title, nav_title)
 
     def _check_localized_metadata_export(
-        self, metadata_lang: str, translate_title: bool, nav_title: str
+        self, metadata_lang: str, translate_title: bool | str, nav_title: str
     ) -> None:
         from wenyi_core.assemble.writer import assemble
         from wenyi_core.ingest.epub_reader import read_epub
@@ -2618,7 +2620,9 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
             store = FileStorage(os.path.join(tmp, "state"))
             store.init_from_document(doc)
             manifest = store.load_manifest()
-            if translate_title:
+            if translate_title == "unchanged":
+                manifest["meta"]["book_title_translated"] = "特拉福买家俱乐部"
+            elif translate_title:
                 manifest["meta"]["book_title_translated"] = "The Trafford Buyers Club"
             manifest["meta"]["epub_creators_translated"] = ["Xishan Baishi"]
             manifest["meta"]["epub_nav_titles_translated"] = [nav_title]
@@ -2642,7 +2646,11 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                 ch1 = BeautifulSoup(zf.read("OEBPS/ch1.xhtml"), "html.parser")
             title = opf.find("dc:title")
             assert isinstance(title, Tag)
-            if translate_title:
+            if translate_title == "unchanged":
+                self.assertEqual(
+                    (title.get_text(), title.get("xml:lang")), ("特拉福买家俱乐部", "zh-CN")
+                )
+            elif translate_title:
                 self.assertEqual(title.get_text(), "The Trafford Buyers Club")
             else:
                 # The suffixed fallback still holds source text, so it keeps the source tag.

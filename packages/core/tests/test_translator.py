@@ -224,7 +224,32 @@ class TestTranslatorAlignment(unittest.TestCase):
                 with pytest.raises(Exception, match="failed at paragraph 0"):
                     translator.translate_batch(["あ"])
 
+        for source, reply in (
+            # Reasoning before an envelope is rejected even for a JSON source.
+            ('{"名称": "值"}', 'Wait, JSON only. {"translations":["value"]}'),
+            # A prose source mentioning "translations:" does not exempt a broken envelope.
+            ("他检查了译文：全错了。", '{"translations":["He checked."} Wait, JSON only.'),
+        ):
+            with self.subTest(reply):
+                translator = Translator(
+                    FakeClient(
+                        handler=lambda messages, tier, json_mode, reply=reply: (
+                            '{"translations":["x"</translations>}' if json_mode else reply
+                        )
+                    ),
+                    self._config(),
+                )
+                with pytest.raises(Exception, match="failed at paragraph 0"):
+                    translator.translate_batch([source])
+
         for source, reply, expected in (
+            ("译本：A和B", "The translations: A and B", "The translations: A and B"),
+            # A fenced code paragraph keeps its fence.
+            (
+                '```python\nx = "值"\n```',
+                '```python\nx = "value"\n```',
+                '```python\nx = "value"\n```',
+            ),
             ("あ", '```json\n{"translations":["译文"]}\n```', "译文"),
             ("あ", "[System] 译文", "[System] 译文"),
             # A JSON source paragraph may translate to JSON in plain-text mode, but an intact

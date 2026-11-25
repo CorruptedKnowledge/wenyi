@@ -28,21 +28,27 @@ _LEGACY_GLOSSARY_PLACEHOLDER_RE = re.compile(r"\$(?:\{glossary\}|glossary\b)")
 # A reply shaped like a JSON object or string array. Prose that merely opens with a bracket
 # ("[System] …") does not match.
 _JSON_ATTEMPT_RE = re.compile(r'^\s*(?:\{|\[\s*")')
-# The translations key, quoted or not, anywhere in a reply.
-_ENVELOPE_KEY_RE = re.compile(r'\btranslations"?\s*:')
+# The translations key as JSON writes it: quoted, or unquoted right after an opening brace.
+# Prose such as "The translations: …" does not match.
+_ENVELOPE_KEY_RE = re.compile(r'(?:"translations"|\{\s*translations)\s*:')
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)\n?```", re.DOTALL)
+
+
+def _fence_body(text: str) -> tuple[str, bool]:
+    """Return ``text`` without a surrounding code fence and whether one was present."""
+    fence = _FENCE_RE.fullmatch(text)
+    return (fence.group(1).strip(), True) if fence else (text, False)
 
 
 def _plain_text_target(text: str, source: str) -> str:
     """Return the paragraph from a plain-text-mode reply, refusing JSON wrappers.
 
-    An intact single-item ``translations`` envelope is unwrapped. Any other reply that
-    mentions the envelope key, or that is JSON-shaped while the source is not, may carry
+    An intact single-item ``translations`` envelope is unwrapped. A reply that mentions the
+    envelope key the source lacks, or that is JSON-shaped while the source is not, may carry
     model reasoning around the translation and is rejected. A code fence around prose is
-    peeled.
+    peeled unless the source paragraph is itself fenced.
     """
-    fence = _FENCE_RE.fullmatch(text)
-    body = fence.group(1).strip() if fence else text
+    body, fenced = _fence_body(text)
     if _JSON_ATTEMPT_RE.match(body):
         try:
             parsed = parse_json_result(body)
@@ -53,10 +59,13 @@ def _plain_text_target(text: str, source: str) -> str:
             items = value.get("translations") if isinstance(value, dict) else None
             if isinstance(items, list) and len(items) == 1 and isinstance(items[0], str):
                 return items[0].strip()
-    source_is_json = bool(_JSON_ATTEMPT_RE.match(source)) or bool(_ENVELOPE_KEY_RE.search(source))
-    if not source_is_json and (_ENVELOPE_KEY_RE.search(text) or _JSON_ATTEMPT_RE.match(body)):
+    source = source.strip()
+    source_body, source_fenced = _fence_body(source)
+    if _ENVELOPE_KEY_RE.search(text) and not _ENVELOPE_KEY_RE.search(source):
         raise AlignmentError("The plain-text translation fallback returned a JSON wrapper")
-    return body if fence and not source_is_json else text
+    if _JSON_ATTEMPT_RE.match(body) and not _JSON_ATTEMPT_RE.match(source_body):
+        raise AlignmentError("The plain-text translation fallback returned a JSON wrapper")
+    return body if fenced and not source_fenced else text
 
 
 class AlignmentError(Exception):
