@@ -13,6 +13,7 @@ import logging
 import re
 
 from ..alignment.objects import marked_sources
+from ..glossary.store import GlossaryStore
 from ..i18n import genres
 from ..llm.json_parser import JsonParseError
 from ..llm.preflight import fit_prompt_to_context_window
@@ -28,6 +29,10 @@ _LEGACY_GLOSSARY_PLACEHOLDER_RE = re.compile(r"\$(?:\{glossary\}|glossary\b)")
 
 class AlignmentError(Exception):
     pass
+
+
+class _EmptyTranslationError(AlignmentError):
+    """Internal marker for a valid JSON array containing blank string translations."""
 
 
 class Translator(Agent):
@@ -131,7 +136,7 @@ class Translator(Agent):
         next_source: str = "",
         *,
         allow_empty_translations: bool = False,
-    ) -> tuple[list[str], Messages]:
+    ) -> tuple[list[str], Messages | None]:
         """Translate one batch and validate output types, count and (by default) nonempty content.
 
         When ``allow_empty_translations`` is true (MinerU PDF path), blank strings are kept as
@@ -291,9 +296,23 @@ class Translator(Agent):
         items = self._extract_batch_items(data, n)
         if not allow_empty_translations and any(not item.strip() for item in items):
             if n == 1:
-                items, raw, messages = self._recover_empty_single_paragraph(messages, raw)
+                try:
+                    items, raw, messages = self._recover_empty_single_paragraph(messages, raw)
+                except _EmptyTranslationError:
+                    _LOGGER.warning(
+                        "Single-paragraph JSON follow-up remained empty; retrying in plain-text mode"
+                    )
+                    plain = self._translate_one_plain_text(
+                        sources[0],
+                        glossary_terms,
+                        style,
+                        (annotation_contexts or [[]])[0],
+                    )
+                    return [plain], None
             else:
-                raise AlignmentError("The model returned an empty or non-string translation")
+                raise _EmptyTranslationError(
+                    "The model returned an empty or non-string translation"
+                )
         turn = [
             *messages,
             {"role": "assistant", "content": raw},
@@ -354,8 +373,104 @@ class Translator(Agent):
             ) from error
         items = self._extract_batch_items(data, 1)
         if not items[0].strip():
-            raise AlignmentError("The model returned an empty or non-string translation")
+            raise _EmptyTranslationError("The model returned an empty or non-string translation")
         return items, retry_raw, follow_up
+
+    def _translate_one_plain_text(
+        self,
+        source: str,
+        glossary_terms: list[GlossaryTerm],
+        style: str,
+        annotation_context: list[dict[str, str]],
+    ) -> str:
+        """Fallback for a single paragraph when JSON mode collapses into an empty string.
+
+        Some models with JSON-mode decoding collide on leading dialogue quotes (emitting ``""``
+        instead of ``"\\"...``) or refuse fragments inside a JSON array. Requesting plain text
+        avoids JSON string-quoting collisions while keeping matched glossary terms, style, and
+        protected markers intact.
+        """
+        marked_source = marked_sources([source], [annotation_context])[0]
+        prompt_vals = dict(self.language_policy.prompt_values)
+        lang_guidance = prompt_vals.get("configured_lang_guidance", "") or prompt_vals.get(
+            "lang_guidance", ""
+        )
+        punct_rule = prompt_vals.get("punct_rule", "")
+        protected_guidance = prompts.protected_object_guidance([marked_source])
+        matched_terms = GlossaryStore.terms_in(glossary_terms, source)
+        glossary_block = (
+            prompts.render_glossary(
+                matched_terms,
+                source_lang=self.src,
+                genre=self.language_policy.context.genre,
+                note_source=None,
+            )
+            if matched_terms
+            else ""
+        )
+        system_parts = [
+            (
+                f"You are an experienced literary translator translating {self.src} into "
+                f"{self.tgt}. Translate the user's single paragraph faithfully and return ONLY "
+                "the translated paragraph as plain text—no JSON, no array brackets, no "
+                "explanations. Even if the paragraph begins with quotation marks or looks like "
+                "a fragment, boilerplate, or watermark, translate it literally or preserve it "
+                "as-is; never return an empty response."
+            ),
+        ]
+        if lang_guidance:
+            system_parts.append(f"Language guidance:\n{lang_guidance}")
+        if punct_rule:
+            system_parts.append(punct_rule)
+        if protected_guidance:
+            system_parts.append(protected_guidance)
+        if style:
+            style_heading = genres.compose(
+                "${genre_style_heading}", genre=self.language_policy.context.genre
+            )
+            system_parts.append(prompts.wrap_untrusted_style(style_heading, style))
+        if glossary_block:
+            system_parts.append(
+                prompts.wrap_untrusted_reference(
+                    "Relevant glossary terms",
+                    "glossary_data",
+                    glossary_block,
+                    item_label="glossary",
+                )
+            )
+        user_parts: list[str] = []
+        if annotation_context:
+            user_parts.append(
+                "[Paragraph-specific annotation references] (JSON; reference only, do not copy)\n"
+                + json.dumps(annotation_context, ensure_ascii=False)
+            )
+        user_parts.append(marked_source)
+        messages: Messages = [
+            {"role": "system", "content": "\n\n".join(system_parts)},
+            {"role": "user", "content": "\n\n".join(user_parts)},
+        ]
+        try:
+            raw = self.client.complete(
+                messages,
+                operation="translation.body",
+                json_mode=False,
+            )
+        except TruncatedResponseError as error:
+            raise AlignmentError(
+                "The translation response reached the output token limit"
+            ) from error
+        text = (raw or "").strip()
+        if text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict) and "translations" in parsed:
+                items = self._extract_batch_items(parsed, 1)
+                text = items[0].strip()
+        if not text:
+            raise _EmptyTranslationError("The model returned an empty or non-string translation")
+        return text
 
     def _translate_one(
         self,
@@ -439,7 +554,7 @@ class Translator(Agent):
                 targets = list(sources)
                 for index, target in zip(translated_indices, translated):
                     targets[index] = target
-                return targets, turn, list(translated_indices)
+                return targets, turn, (list(translated_indices) if turn is not None else None)
             except AlignmentError as error:
                 # Recover only output protocol/alignment errors; the provider handles transport retries.
                 last_error = error
