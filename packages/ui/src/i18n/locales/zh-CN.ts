@@ -512,7 +512,7 @@ const zhCN = {
     "全部章节译完后，统一重复引文、补齐遗漏术语并校准跨章称谓或称号漂移。",
   "settings.deterministicHygiene": "确定性格式整理",
   "settings.deterministicHygieneHelp":
-    "每章完成后自动执行确定性的标点、引号、换行与残留标记规范化。",
+    "每章完成后修复泄漏的 \\n 并统一已观察到的译名异写；不改动引号与破折号。",
   "settings.glossaryMode": "术语模式",
   "settings.glossaryModeHelp":
     "“逐批抽取”在翻译过程中按批提取术语；“全书预编译词典”在翻译前先生成全书术语词典、规范与重复引文定译，并支持多章并行翻译。",

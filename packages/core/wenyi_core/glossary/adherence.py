@@ -29,6 +29,37 @@ def _matcher(key: str) -> re.Pattern[str] | str:
     return _source_pattern(key) or key
 
 
+# Inflected targets decline names and terms ("Москва" -> "в Москве", "Лунный лес" ->
+# "в Лунном лесу"), so a target word counts as used when its stem appears with a short
+# ending shorter than the stem. Matching more loosely only keeps a mapping in prompts
+# longer; it never drops one.
+_STEM_TRIM = 2
+_MIN_STEM_WORD = 5
+_MAX_ENDING = 4
+
+
+def _inflection_tolerant_matcher(key: str) -> re.Pattern[str] | str:
+    """Match each target word with an optional short ending in spaced scripts.
+
+    Unspaced scripts (CJK) keep the plain substring match, which already ignores endings.
+    """
+    if _source_pattern(key) is None:
+        return key
+    parts = []
+    for word in key.split():
+        if len(word) >= _MIN_STEM_WORD and word[-1].isalpha():
+            stem = word[:-_STEM_TRIM]
+        else:
+            stem = word
+        # Short words take a proportionally short ending, so "Lu" never matches "Lushan".
+        max_ending = min(_MAX_ENDING, len(stem) - 1)
+        ending = rf"\w{{0,{max_ending}}}" if max_ending > 0 and stem[-1:].isalnum() else ""
+        parts.append(re.escape(stem) + ending)
+    left = r"(?<!\w)" if key[:1].isalnum() else ""
+    right = r"(?!\w)" if key[-1:].isalnum() else ""
+    return re.compile(left + r"\s+".join(parts) + right)
+
+
 def _found(matcher: re.Pattern[str] | str, text: str) -> bool:
     return matcher in text if isinstance(matcher, str) else matcher.search(text) is not None
 
@@ -81,7 +112,7 @@ class GlossaryAdherence:
             # Aliases are not counted: a hero called by an epithet (大圣 "the Great Sage") must
             # not make the main name look overridden.
             source = _matcher(source_key) if source_key else None
-            target = _matcher(target_key) if target_key else None
+            target = _inflection_tolerant_matcher(target_key) if target_key else None
             for position, source_text, target_text in self._pairs[start:]:
                 if source is not None and _found(source, source_text):
                     counts.hits[position] = target is not None and _found(target, target_text)

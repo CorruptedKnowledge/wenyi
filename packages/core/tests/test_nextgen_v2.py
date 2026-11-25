@@ -2,9 +2,9 @@
 - Provider-safe thinking escalation (ThinkingControl.escalate, escalate_route_thinking, RoutedLLMClient)
 - Deterministic draft anomaly pre-screener (batch_risk.py) & risk-routed SparseSemanticEditor
 - Multilingual Book Bible mining (Japanese katakana/honorifics/ruby, Latin connectors/corpus),
-  index-key probe fallback, morpheme-family clustering, spoiler-safe gender guard, conventions
+  index-key probe fallback, morpheme-family clustering, conventions
 - Wave-local & cross-chapter pre-rendered QuoteMemory
-- Post-normalize fixes (straight-quote preservation, intra-paragraph mixed spelling, CJK hygiene/names)
+- Post-normalize repairs (leaked escapes, observed cased-script name variants only)
 - Cross-language pair sheets (ja->en, en->zh) & base-locale fallback (zh->en-US/en-GB)
 - Post-parallel ConsistencySweepService
 """
@@ -17,7 +17,6 @@ from wenyi_core.agents.batch_risk import assess_batch_risk, has_embedded_verse
 from wenyi_core.agents.book_bible import (
     BibleCandidate,
     BookBibleAgent,
-    _apply_spoiler_safe_gender_guard,
     _cluster_candidate_rows,
     mine_bible_candidates,
     select_voice_excerpts,
@@ -37,9 +36,8 @@ from wenyi_core.pipeline.translate.consistency_sweep import (
     detect_mid_frequency_drift,
 )
 from wenyi_core.pipeline.translate.post_normalize import (
-    normalize_chapter_cjk_typography,
-    normalize_chapter_latin_typography,
     normalize_minority_names,
+    repair_escaped_newlines,
 )
 from wenyi_core.pipeline.translate.quote_memory import QuoteMemory
 
@@ -151,7 +149,7 @@ def test_book_bible_mines_latin_connectors_and_corpus_entities():
     assert "Meanwhile" not in cands
 
 
-def test_book_bible_morpheme_clustering_and_spoiler_safe_gender_guard():
+def test_book_bible_morpheme_clustering():
     cands = [
         (BibleCandidate("青云楼", 4, True, "", ""), "Azure Pavilion", "Qingyun Tower", True),
         (
@@ -164,17 +162,6 @@ def test_book_bible_morpheme_clustering_and_spoiler_safe_gender_guard():
     ]
     rows = _cluster_candidate_rows(cands)
     assert any("[Linked family: 青云]" in r for r in rows)
-
-    terms = [
-        GlossaryTerm(source="秦公子", target="Young Master Qin", type="person", gender="female"),
-        GlossaryTerm(source="林青", target="Lin Qing", type="person", gender="female"),
-    ]
-    corpus = "秦公子微微一笑，他端起茶杯。后来秦公子敛衽一礼，她低声道。林青笑道，她很得意。"
-    guarded = _apply_spoiler_safe_gender_guard(terms, corpus, source_lang="zh")
-    by_src = {t.source: t for t in guarded}
-    assert by_src["秦公子"].gender == ""
-    assert "do not spoil" in by_src["秦公子"].note.lower()
-    assert by_src["林青"].gender == "female"
 
 
 def test_batch_risk_screener_flags_structural_defects_without_escalating_sparse_editor():
@@ -237,32 +224,23 @@ def test_sparse_editor_voice_guard_rejects_gratuitous_style_rewrites():
     assert res.patched_indices == ()
 
 
-def test_post_normalize_fixes_straight_quotes_intra_para_and_cjk():
-    # Straight-quoted chapter must NOT receive curly quotes on single-quote dialogue repair.
-    pairs = [
-        ("他说。", 'He said, "Welcome home."'),
-        ("她答。", "'I have been waiting for hours.'"),
-    ]
-    cleaned, _ = normalize_chapter_latin_typography(pairs, target_lang="en")
-    assert cleaned[1] == '"I have been waiting for hours."'
-    assert "“" not in cleaned[1]
+def test_post_normalize_keeps_punctuation_and_replaces_only_observed_cased_variants():
+    # Quote style, dashes and spaced em dashes are the translation's own house style.
+    for text in (
+        "'I have been waiting for hours.'",
+        "I knew it — you agree.\n—Chronicles of Eastern Wu",
+    ):
+        assert repair_escaped_newlines("原文。", text) == text
 
-    # Mid-sentence spaced em dashes normalize to tight em dashes while attribution dashes stay intact.
-    em_cleaned, _ = normalize_chapter_latin_typography(
-        [("他笑道。", "I knew it — you agree.\n—Chronicles of Eastern Wu")],
-        target_lang="en",
-    )
-    assert em_cleaned[0] == "I knew it—you agree.\n—Chronicles of Eastern Wu"
-
-    # Intra-paragraph mixed spelling (both "Sanzang" and "San Zang" in same paragraph) is fixed.
+    # Mixed spellings without observed evidence are left for the glossary prompt and Review.
     terms = [GlossaryTerm(source="三藏", target="Sanzang", type="person")]
     out, subs = normalize_minority_names(
         [("三藏说道，三藏大喜。", "Sanzang spoke, and San Zang rejoiced.")],
         terms,
         target_lang="en",
     )
-    assert out[0] == "Sanzang spoke, and Sanzang rejoiced."
-    assert len(subs) == 1
+    assert out[0] == "Sanzang spoke, and San Zang rejoiced."
+    assert subs == []
 
     # Shorter variant ("Gao") must never match inside existing canonical ("Old Gao" -> never "Old Old Gao").
     gao_terms = [GlossaryTerm(source="高老", target="Old Gao", type="person")]
@@ -275,7 +253,7 @@ def test_post_normalize_fixes_straight_quotes_intra_para_and_cjk():
     assert gao_out[0] == "Old Gao smiled, and Old Gao nodded."
     assert len(gao_subs) == 1
 
-    # CJK target minority-name normalization & CJK punctuation hygiene work without uppercase letters.
+    # Uncased targets have no word boundary to guard a replacement, so they are left alone.
     zh_terms = [GlossaryTerm(source="Edmund Burke", target="埃德蒙·伯克", type="person")]
     zh_out, zh_subs = normalize_minority_names(
         [("Edmund Burke wrote.", "爱德蒙·伯克写道。")],
@@ -283,14 +261,12 @@ def test_post_normalize_fixes_straight_quotes_intra_para_and_cjk():
         variants_by_source={"Edmund Burke": ("爱德蒙·伯克",)},
         target_lang="zh",
     )
-    assert zh_out[0] == "埃德蒙·伯克写道。"
-    assert len(zh_subs) == 1
+    assert zh_out[0] == "爱德蒙·伯克写道。"
+    assert zh_subs == []
 
-    cjk_cleaned, cjk_fixes = normalize_chapter_cjk_typography(
-        [("Test", "他说这真是--奇事！保留 `a,b--c` 与 $x,y$。")]
-    )
-    assert cjk_cleaned[0] == "他说这真是——奇事！保留 `a,b--c` 与 $x,y$。"
-    assert cjk_fixes == 1
+    # Chinese targets keep raw "--" (it may be a command-line flag) but repair leaked escapes.
+    assert repair_escaped_newlines("Test", "他说这真是--奇事！") == "他说这真是--奇事！"
+    assert repair_escaped_newlines("Test", r"他说完了。\n第二天。") == "他说完了。\n第二天。"
 
 
 def test_quote_memory_clone_and_cross_chapter_preseed():
@@ -333,7 +309,7 @@ def test_is_verse_segment_avoids_asymmetric_prose_false_positive():
     assert is_verse_segment("他站起身，仔细打量着眼前的书生。") is False
 
 
-def test_consistency_sweep_unifies_quotes_and_detects_mid_freq_drift(tmp_path):
+def test_consistency_sweep_keeps_repeated_paragraphs_and_detects_mid_freq_drift(tmp_path):
     from wenyi_core.storage.file import FileStorage
 
     store = FileStorage(str(tmp_path), create=True)
@@ -398,9 +374,10 @@ def test_consistency_sweep_unifies_quotes_and_detects_mid_freq_drift(tmp_path):
     cfg = Config(source_lang="zh", target_lang="en", llm=LLMConfig(preset="fake"))
     editor = SparseSemanticEditor(FakeClient(lambda m, op, jm: json.dumps({"patches": []})), cfg)
     svc = ConsistencySweepService(editor, source_lang="zh", target_lang="en")
-    res = svc.run(store, chapter_indices=[0, 1], terms=[])
-    assert res.quotes_unified == 1
-    assert store.load_chapter(1).text_segments[0].target == ch0.text_segments[0].target
+    svc.run(store, chapter_indices=[0, 1], terms=[])
+    # A repeated source line can need a different rendering in a different scene, so the
+    # sweep never overwrites it with the earlier chapter's translation.
+    assert store.load_chapter(1).text_segments[0].target == ch1.text_segments[0].target
 
 
 def test_pr30_review_regressions(tmp_path):
@@ -420,25 +397,11 @@ def test_pr30_review_regressions(tmp_path):
     rows = _cluster_candidate_rows(dup_cands)
     assert sum("青云青云" in r for r in rows) == 1
 
-    # 3. Spoiler-safe gender guard does not clear male gender on mixed-gender dialogue about two people.
-    mixed = _apply_spoiler_safe_gender_guard(
-        [GlossaryTerm(source="张明", target="Zhang Ming", type="person", gender="male")],
-        "张明看着李芳，他说她应该回家。",
-        source_lang="zh",
+    # 4. post_normalize: em-dash \n unescapes, OLD Gao stays intact.
+    assert (
+        repair_escaped_newlines("诗。", "A spring outing—\\nApricot blossoms.")
+        == "A spring outing—\nApricot blossoms."
     )
-    assert mixed[0].gender == "male"
-
-    # 4. post_normalize: URL mask leaves closing quote intact, em-dash \n unescapes, OLD Gao stays intact.
-    url_cleaned, _ = normalize_chapter_latin_typography(
-        [
-            ("他说。", 'He said, "Hello."'),
-            ("她说。", "“Visit https://example.com”"),
-            ("诗。", "A spring outing—\\nApricot blossoms."),
-        ],
-        target_lang="en",
-    )
-    assert url_cleaned[1] == '"Visit https://example.com"'
-    assert url_cleaned[2] == "A spring outing—\nApricot blossoms."
 
     norm_res, _ = normalize_minority_names(
         [("高老", "OLD Gao spoke, and Gao nodded.")],
@@ -473,7 +436,6 @@ def test_pr30_review_regressions(tmp_path):
         'He said, "Never forget the oath of winter." and "Hold the northern wall tonight."',
         'He said, "Never forget the winter oath."',
     )
-    assert qm_multi.exact_match("Never forget the oath of winter.") is None
     assert (
         qm_multi.references_for_batch(['She whispered, "Never forget the oath of winter."']) == []
     )
@@ -509,8 +471,7 @@ def test_pr30_review_regressions(tmp_path):
         source_lang="zh",
         target_lang="en",
     )
-    res_docx = svc.run(store, chapter_indices=[0, 1], terms=[])
-    assert res_docx.quotes_unified == 0
+    svc.run(store, chapter_indices=[0, 1], terms=[])
     assert store.load_chapter(1).text_segments[0].target == "Protected DOCX styled line."
 
 

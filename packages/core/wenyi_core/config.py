@@ -73,7 +73,7 @@ pipeline:
   chapter_concurrency: 1
   # Standard-mode polish workers; above 1, polishing runs in the background while translation continues.
   polish_concurrency: 1
-  # Deterministic post-translation typography hygiene and minority-name normalization (zero model calls).
+  # Zero-cost post-translation repairs: leaked newline escapes and Book Bible name variants.
   deterministic_hygiene: true
   # Fast post-translation cross-chapter consistency sweep (unifies repeated quotes and missed glossary terms).
   consistency_sweep: false
@@ -197,7 +197,7 @@ class PipelineConfig(BaseModel):
     # Above 1, standard-mode polish jobs run in a bounded background pool while translation
     # continues; 1 polishes each batch inline. Ignored by three_draft_synthesis.
     polish_concurrency: int = Field(default=1, ge=1)
-    # Apply deterministic post-translation typography hygiene and minority-name normalization.
+    # Repair leaked newline escapes and normalize Book Bible name variants (no model calls).
     deterministic_hygiene: bool = True
     # Fast post-translation cross-chapter consistency sweep (quotes + missed glossary entities).
     consistency_sweep: bool = False

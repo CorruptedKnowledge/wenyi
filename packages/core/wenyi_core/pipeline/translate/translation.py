@@ -49,11 +49,7 @@ from .context import render_recent_translations
 from .extraction_queue import ExtractionQueue
 from .glossary_notes import GlossaryNotes
 from .polish_queue import PolishOutcome, PolishQueue
-from .post_normalize import (
-    normalize_chapter_cjk_typography,
-    normalize_chapter_latin_typography,
-    normalize_minority_names,
-)
+from .post_normalize import normalize_minority_names, repair_escaped_newlines
 from .precision import PrecisionBatchExecutor, PrecisionError
 from .quote_memory import QuoteMemory
 from .title_translation import TitleTranslationService
@@ -97,10 +93,6 @@ def _draft_pairs(
     ]
 
 
-_LATIN_TARGET_LANGS = frozenset(
-    {"en", "en-US", "en-GB", "fr", "de", "es", "it", "pt", "pt-BR", "pt-PT", "vi"}
-)
-_CJK_HYGIENE_TARGET_LANGS = frozenset({"zh", "zh-Hant"})
 _HUGE_CHAPTER_BATCH_THRESHOLD = 12
 _HUGE_CHAPTER_WAVE_SIZE = 6
 _SOURCE_LOOKBEHIND_PARAS = 3
@@ -930,7 +922,7 @@ class TranslationService:
             # The chapter is done only once its terms are stored and its polish is applied.
             if self._polish_queue is not None and ci in self._polish_queue.pending_chapters():
                 self._awaiting_polish.add(ci)
-                self._publish_terms[ci] = (terms, self._hygiene_variants(store))
+                self._publish_terms[ci] = (terms, self._hygiene_variants())
             else:
                 self._publish_chapter(store, ci, terms=terms)
 
@@ -969,20 +961,14 @@ class TranslationService:
         )
         return done
 
-    def _hygiene_variants(self, store: Storage) -> dict[str, list[str]]:
-        """Known alternative spellings: Bible probe renderings plus open conflict proposals."""
-        variants_by_source: dict[str, list[str]] = {
-            k: list(v) for k, v in self._bible_variants.items()
-        }
-        try:
-            for conflict in store.open_conflicts():
-                src = conflict.get("source")
-                prop = conflict.get("proposed_target")
-                if isinstance(src, str) and isinstance(prop, str) and prop.strip():
-                    variants_by_source.setdefault(src, []).append(prop.strip())
-        except Exception:  # noqa: BLE001 - optional conflict enrichment
-            pass
-        return variants_by_source
+    def _hygiene_variants(self) -> dict[str, list[str]]:
+        """Renderings the Book Bible probe observed for each source term.
+
+        Open glossary conflicts are deliberately excluded: a conflict is open because the
+        other rendering may be correct (a homonym, a second character with the same name),
+        so it is left to adjudication and Review rather than overwritten here.
+        """
+        return {k: list(v) for k, v in self._bible_variants.items()}
 
     @staticmethod
     def _has_offset_bound_metadata(head: Segment) -> bool:
@@ -1006,7 +992,7 @@ class TranslationService:
         terms: list[GlossaryTerm] | None = None,
         variants: dict[str, list[str]] | None = None,
     ) -> None:
-        """Apply zero-cost deterministic typography hygiene and minority-name normalization."""
+        """Repair leaked ``\\n`` escapes and normalize Bible-observed name variants (no model calls)."""
         if not self._runtime.config.pipeline.deterministic_hygiene:
             return
         # Segments belonging to logical paragraphs with offset-bound annotation, protected-object,
@@ -1024,29 +1010,16 @@ class TranslationService:
             return
         typo_fixes = 0
         target_lang = self._runtime.config.target_lang
-        if target_lang in _LATIN_TARGET_LANGS:
-            ch_pairs = [(seg.source, seg.target or "") for seg in text_segs]
-            cleaned_targets, _ = normalize_chapter_latin_typography(
-                ch_pairs, target_lang=target_lang
-            )
-            for seg, cleaned in zip(text_segs, cleaned_targets):
-                if id(seg) in protected_ids:
-                    continue
-                if cleaned != seg.target:
-                    _set_hygienic_target(seg, cleaned)
-                    typo_fixes += 1
-        elif target_lang in _CJK_HYGIENE_TARGET_LANGS:
-            ch_pairs = [(seg.source, seg.target or "") for seg in text_segs]
-            cleaned_targets, _ = normalize_chapter_cjk_typography(ch_pairs)
-            for seg, cleaned in zip(text_segs, cleaned_targets):
-                if id(seg) in protected_ids:
-                    continue
-                if cleaned != seg.target:
-                    _set_hygienic_target(seg, cleaned)
-                    typo_fixes += 1
+        for seg in text_segs:
+            if id(seg) in protected_ids:
+                continue
+            cleaned = repair_escaped_newlines(seg.source, seg.target or "")
+            if cleaned != seg.target:
+                _set_hygienic_target(seg, cleaned)
+                typo_fixes += 1
 
         effective_terms = list(terms) if terms is not None else store.all_terms()
-        variants_by_source = variants if variants is not None else self._hygiene_variants(store)
+        variants_by_source = variants if variants is not None else self._hygiene_variants()
 
         pairs = [(seg.source, seg.target or "") for seg in text_segs]
         normalized_targets, raw_name_subs = normalize_minority_names(

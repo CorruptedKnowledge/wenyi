@@ -539,7 +539,7 @@ const en = {
     "After all chapters finish, unify repeated quotes, patch missed glossary terms, and reconcile cross-chapter title or epithet drift.",
   "settings.deterministicHygiene": "Deterministic formatting hygiene",
   "settings.deterministicHygieneHelp":
-    "Normalize punctuation, quotation marks, line breaks, and stray markup artifacts deterministically after each chapter.",
+    "Repair leaked \\n escapes and unify observed name spellings after each chapter. Quotes and dashes are left unchanged.",
   "settings.glossaryMode": "Glossary mode",
   "settings.glossaryModeHelp":
     "Incremental extracts terms batch by batch. Compiled pre-compiles a book-wide glossary, conventions, and repeated quotes before translation so chapters can run in parallel.",

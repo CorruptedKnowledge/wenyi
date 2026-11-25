@@ -118,6 +118,22 @@ class TestGlossaryAdherence:
         assert tracker.ignored(_term("禄山", "Lu"))
         assert not tracker.ignored(_term("禄山", "the  an lushan"))
 
+    def test_inflected_targets_count_declined_forms_as_used(self):
+        """Russian, German or Polish decline names and terms; that is not an override."""
+        tracker = GlossaryAdherence()
+        _observe(
+            tracker,
+            [
+                ("Moon Forest lay ahead.", "Лунный лес лежал впереди."),
+                ("They entered Moon Forest.", "Они вошли в Лунный лес."),
+                ("In Moon Forest it was dark.", "В Лунном лесу было темно."),
+                ("They left Moon Forest.", "Они вышли из Лунного леса."),
+                ("Back to Moon Forest.", "Назад к Лунному лесу."),
+                ("Beyond Moon Forest.", "За Лунным лесом."),
+            ],
+        )
+        assert not tracker.ignored(_term("Moon Forest", "Лунный лес"))
+
     def test_unspaced_scripts_match_targets_inside_running_text(self):
         tracker = GlossaryAdherence()
         _observe(

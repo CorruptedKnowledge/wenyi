@@ -296,7 +296,7 @@ def test_parallel_compiled_pipeline_is_order_independent_and_resumable(tmp_path:
                 return json.dumps(
                     {"translations": [f"Pilgrim and Sanzang ({i}) -- ok." for i in range(n)]}
                 )
-            if "bilingual literary editor" in sys_msg:
+            if "senior bilingual editor" in sys_msg:
                 return json.dumps({"patches": []})
             if "chapter title translator" in sys_msg:
                 n = len(re.findall(r"^\[\d+\]", user_msg, re.MULTILINE))
@@ -334,8 +334,8 @@ def test_parallel_compiled_pipeline_is_order_independent_and_resumable(tmp_path:
     assert bible_a == 3 and bible_b == 3
     # Completion order never changes chapter content.
     assert targets_a == targets_b
-    # Deterministic hygiene fixed '--' -> '—'.
-    assert all("—" in t and "--" not in t for segs in targets_a.values() for t in segs)
+    # Deterministic hygiene never rewrites the model's punctuation ('--' is kept as drafted).
+    assert all(t.endswith("-- ok.") for segs in targets_a.values() for t in segs)
     # Chapter 1 opening context received deterministic positional source lookbehind (not translated targets).
     assert "Preceding chapter closing source" in ctx_a["ch1"]
     assert "行者笑著說道" in ctx_a["ch1"]
@@ -421,9 +421,9 @@ def test_benchmark_metrics_script_analyzes_completed_run(tmp_path: Path):
     report = mod.analyze_run(str(tmp_path))
     assert report["segments_translated"] == 2
     assert report["glossary_entries"] >= 1
-    assert report["formatting_lint"]["colon_tags"] == 0
-    assert report["formatting_lint"]["raw_double_dash"] == 0
-    assert report["post_normalized"]["typography_fixes"] >= 1
+    # Hygiene leaves the model's punctuation alone, so the lint still sees it.
+    assert report["formatting_lint"]["colon_tags"] == 2
+    assert report["formatting_lint"]["raw_double_dash"] == 2
 
 
 def test_book_bible_snippets_follow_normalized_offsets_after_readings():
@@ -667,24 +667,24 @@ def test_parallel_resume_repolishes_drafts_whose_polish_failed(tmp_path: Path):
     base = _parallel_handler([])
 
     def drafting(messages, tier, json_mode):
-        if "bilingual literary editor" in messages[0]["content"]:
+        if "senior bilingual editor" in messages[0]["content"]:
             raise RuntimeError("editor down")
         if "literary translator" in messages[0]["content"]:
             n = len(re.findall(r"^\[\d+\]", messages[-1]["content"], re.MULTILINE))
-            # Hygiene rewrites "--", so the published text differs from the raw draft.
-            return json.dumps({"translations": [f"Draft -- {i}." for i in range(n)]})
+            # Hygiene repairs the leaked escape, so the published text differs from the raw draft.
+            return json.dumps({"translations": [f"Draft\\n{i}." for i in range(n)]})
         return base(messages, tier, json_mode)
 
     cfg = _parallel_config(tmp_path, polish=True, polish_mode="sparse")
     store = Orchestrator(cfg, client=FakeClient(handler=drafting)).run(str(book))
     first = store.load_chapter(1).text_segments
     assert all(s.meta.get(POLISH_FAILED) for s in first)
-    assert [s.target for s in first] == ["Draft—0."] * len(first)
+    assert [s.target for s in first] == ["Draft\n0."] * len(first)
 
     edits: list[str] = []
 
     def editing(messages, tier, json_mode):
-        if "bilingual literary editor" in messages[0]["content"]:
+        if "senior bilingual editor" in messages[0]["content"]:
             edits.append(messages[-1]["content"])
             return json.dumps({"patches": [{"index": 0, "reason": "fix", "text": "Polished."}]})
         return base(messages, tier, json_mode)
@@ -1383,7 +1383,7 @@ def test_compiled_book_bible_cache_hits_on_resume_with_translated_repeated_quote
                     ]
                 }
             )
-        if "bilingual literary editor" in sys_msg:
+        if "senior bilingual editor" in sys_msg:
             return json.dumps({"patches": []})
         if "chapter title translator" in sys_msg:
             nums = re.findall(r"^\[(\d+)\]", user_msg, re.MULTILINE)
@@ -1779,8 +1779,8 @@ def test_chapter_hygiene_preserves_offset_bound_annotation_and_docx_style_segmen
     assert ann_head.target == 'Walker paused -- "First part.'
     assert ann_cont.target == "Continuation -- here."
     assert docx_seg.target == 'Sanzang said: "Wait -- now."'
-    # Plain segment still receives both typography hygiene and minority-name normalization.
-    assert plain_seg.target == 'Pilgrim said, "Wait—now."'
+    # Plain segment receives minority-name normalization; punctuation is left as drafted.
+    assert plain_seg.target == 'Pilgrim said: "Wait -- now."'
 
 
 def test_bible_candidates_tiebreak_deterministically_at_max_candidates():
@@ -1878,3 +1878,53 @@ def test_entity_markers_plain_retry_rejects_residual_marker_brackets():
     )
     with pytest.raises(ValueError, match="residual marker"):
         executor.translate(plan)
+
+
+def test_book_bible_keeps_adjudicated_gender_when_scenes_mix_pronouns():
+    """他 and 她 after a name usually refer to other people; they are no disguise signal."""
+
+    def handler(messages, tier, json_mode):
+        sys_msg = messages[0]["content"]
+        if "terminology prober" in sys_msg:
+            return json.dumps({"renderings": {"黛玉": "Daiyu"}})
+        if "Book Bible" in sys_msg:
+            return json.dumps(
+                {
+                    "terms": [
+                        {"source": "黛玉", "target": "Daiyu", "type": "person", "gender": "female"}
+                    ]
+                }
+            )
+        return "{}"
+
+    corpus = "黛玉见了他，心中一动。黛玉低头想她母亲的话。黛玉笑了。黛玉起身。黛玉回房。"
+    agent = _bible_agent(handler)
+    result = agent.compile_bible(["黛玉见了宝玉。"], corpus)
+    by_source = {term.source: term for term in result.terms}
+    assert by_source["黛玉"].gender == "female"
+    assert "do not spoil" not in by_source["黛玉"].note.lower()
+
+
+def test_chapter_hygiene_never_resolves_open_glossary_conflicts(tmp_path: Path):
+    from wenyi_core.models.document import Chapter, Segment
+    from wenyi_core.pipeline.annotate.annotations import AnnotationService
+    from wenyi_core.pipeline.run.runtime import PipelineRuntime
+    from wenyi_core.pipeline.translate.translation import TranslationService
+    from wenyi_core.storage.file import FileStorage
+
+    cfg = _parallel_config(tmp_path, chapter_concurrency=1)
+    store = FileStorage(str(tmp_path / "run"), create=True)
+    runtime = PipelineRuntime(cfg, client=FakeClient(handler=_parallel_handler([])))
+    service = TranslationService(runtime, AnnotationService(runtime))
+    # The conflict is open because "White Rock" may be a different place, so hygiene must
+    # leave it to adjudication and Review instead of rewriting it to the stored target.
+    store.open_conflicts = lambda: [{"source": "白石", "proposed_target": "White Rock"}]
+    seg = Segment(
+        index=0, source="白石在白石镇外。", target="White Stone lies beyond White Rock Town."
+    )
+    chapter = Chapter(index=0, title="Ch1", segments=[seg])
+    terms = [GlossaryTerm(source="白石", target="White Stone", type="place")]
+
+    service._apply_chapter_hygiene(store, chapter, terms=terms)
+
+    assert seg.target == "White Stone lies beyond White Rock Town."

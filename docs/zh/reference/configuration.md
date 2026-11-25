@@ -353,7 +353,7 @@ CLI 只覆盖其参数明确支持的设置；Web/Desktop 项目限制见[作用
 | `pipeline.polish` | `true` | 润色已译批次，增加较多模型工作。 |
 | `pipeline.polish_mode` | `full` | `full` 重写整批译文；`sparse` 运行对照原文的稀疏语义与文风编辑，仅对存在实质语义反转、典故或格式缺陷的段落输出 JSON 补丁。 |
 | `pipeline.polish_concurrency` | `1` | 标准模式润色并发，整数 ≥ 1。`1` 在下一批开始前润色当前批；大于 `1` 时先保存初稿，在后台润色并继续翻译，最多排队该值两倍的批次。provider `max_concurrency` 仍然生效。`three_draft_synthesis` 忽略此项。见[后台润色](../guide/pipeline.md#deferred-polishing)。 |
-| `pipeline.deterministic_hygiene` | `true` | 启用零模型开销的确定性译后排版清理（含拉丁与中文标点规范，保护代码与 LaTeX）及少数译名归一。 |
+| `pipeline.deterministic_hygiene` | `true` | 启用零模型开销的译后修复：原文段落不含字面 `\n` 时，将译文中泄漏的字面 `\n` 转为换行（保护代码与 LaTeX）；在 compiled 术语模式下，对有大小写的文字目标语言，把 Book Bible 探针观察到的译名异写统一为术语表规范译名。不改写引号、破折号或说话标记；导出时的引号样式请用 `output.quote_style`。 |
 | `pipeline.consistency_sweep` | `false` | 启用快速译后跨章一致性扫描（统一跨章重复引文并定向修补遗漏的术语规范译名）。 |
 | `pipeline.entity_markers` | `false` | 实验选项：草稿翻译时将高稳定专有名词替换为不透明 `⟦N#⟧` 标记，译后按冻结术语表确定性回填。 |
 | `pipeline.batch_glossary` | `all` | `all` 向每个正文翻译、润色和精翻请求发送全量实体术语（EPUB 目录标题仅在命中本批原文时携带）；`relevant` 只向每批发送与其文本匹配的词条，并让抽取只看到被抽取文本中出现的已有词条。见[翻译上下文与术语库](../guide/pipeline.md#context-and-glossary)。 |

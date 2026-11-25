@@ -51,7 +51,7 @@ pipeline:
   chapter_concurrency: 1
   # Standard-mode polish workers; above 1, polishing runs in the background while translation continues.
   polish_concurrency: 1
-  # Deterministic post-translation typography hygiene and minority-name normalization (zero model calls).
+  # Zero-cost post-translation repairs: leaked newline escapes and Book Bible name variants.
   deterministic_hygiene: true
   # Fast post-translation cross-chapter consistency sweep (unifies repeated quotes and missed glossary terms).
   consistency_sweep: false
