@@ -304,6 +304,40 @@ def test_style_analysis_cache_scopes_to_analysis_style_route(tmp_path):
     assert orch3._preparation._analyze_document(store, parsed, ["d0"], "src-sha")
     assert [c["operation"] for c in third_client.calls] == ["analysis.style"]
 
+    # Tightening analysis.style context_window so chapter digests truncate invalidates the cache.
+    long_digests = [f"Chapter {i} summary " + ("detail " * 80) for i in range(40)]
+    wide_cfg = Config.from_dict(
+        {
+            "language": {"source": "ja", "target": "zh"},
+            "llm": {
+                "preset": "deepseek",
+                "models": {ref: {"context_window": 128_000}},
+                "routes": base_routes,
+            },
+            "paths": {"state_dir": str(tmp_path / "state")},
+        }
+    )
+    wide_client = FakeClient(handler=routing_handler)
+    orch_wide = Orchestrator(wide_cfg, client=wide_client, storage=store)
+    assert orch_wide._preparation._analyze_document(store, parsed, long_digests, "src-sha")
+    assert [c["operation"] for c in wide_client.calls] == ["analysis.style"]
+
+    narrow_cfg = Config.from_dict(
+        {
+            "language": {"source": "ja", "target": "zh"},
+            "llm": {
+                "preset": "deepseek",
+                "models": {ref: {"context_window": 4_000}},
+                "routes": base_routes,
+            },
+            "paths": {"state_dir": str(tmp_path / "state")},
+        }
+    )
+    narrow_client = FakeClient(handler=routing_handler)
+    orch_narrow = Orchestrator(narrow_cfg, client=narrow_client, storage=store)
+    assert orch_narrow._preparation._analyze_document(store, parsed, long_digests, "src-sha")
+    assert [c["operation"] for c in narrow_client.calls] == ["analysis.style"]
+
 
 class TestSampleText(unittest.TestCase):
     def _long_doc(self, d):
