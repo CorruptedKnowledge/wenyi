@@ -699,6 +699,7 @@ class TranslationService:
                                     for s in b
                                 )
                             ),
+                            self._bible_variants or None,
                         ),
                     )
                 seg_base += len(b)
@@ -750,6 +751,7 @@ class TranslationService:
                 next_source,
                 allow_empty_translations=allow_empty_translations,
                 entity_markers=self._runtime.config.pipeline.entity_markers,
+                variants_by_source=self._bible_variants or None,
             )
             if self._runtime.config.pipeline.translation_mode == "three_draft_synthesis":
 

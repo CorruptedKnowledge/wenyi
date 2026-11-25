@@ -49,8 +49,9 @@ _PERIOD_N_GUARD = rf"(?:(?:{_LATEX_N_CMD_SUFFIXES}|ew|ot)(?![A-Za-z])|u(?![A-Za-
 _ESCAPED_NEWLINE_RE = re.compile(
     rf"(?<=[,;!?…—\"”'’】》」』])(?<!\\)(?:\\n)+(?=[A-Za-z])(?!{_LATEX_N_GUARD})"
     rf"|(?<=\.)(?<!\\)(?:\\n)+(?=[A-Za-z])(?!{_PERIOD_N_GUARD})"
-    # A standalone escape must be glued to the preceding text: "as \\n." in prose is notation.
-    r"|(?<![\s\\])(?:\\n)+(?![A-Za-z])"
+    # A standalone escape run must be glued to the preceding text and taken whole: "as \\n."
+    # or "use \\n\\n to" in prose is notation, never a half-converted run.
+    r"|(?<![\s\\])(?<!\\n)(?:\\n)+(?!\\n)(?![A-Za-z])"
 )
 
 

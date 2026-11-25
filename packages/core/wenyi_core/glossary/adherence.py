@@ -29,25 +29,24 @@ def _matcher(key: str) -> re.Pattern[str] | str:
     return _source_pattern(key) or key
 
 
-# Inflected targets decline names and terms ("Москва" -> "в Москве", "Лунный лес" ->
-# "в Лунном лесу"), so a target word counts as used with a short ending. Words of six or
-# more letters may also change their last two letters; shorter words keep their full form,
-# so "court" never matches "could" and "force" never matches "for". A false hit only keeps
-# a mapping in prompts longer; it never drops one or changes text.
-_STEM_TRIM = 2
-_MIN_STEM_WORD = 6
-_MAX_ENDING = 3
+# Inflected targets decline names and terms ("Москва" -> "в Москве", "Алиса" -> "Алисой",
+# "Лунный лес" -> "в Лунном лесу"), so a target word counts as used when it appears with a
+# changed final letter or two and a short ending. The stem always keeps all but the last one
+# or two letters, so "court" never matches "could" and "force" never matches "for". A false
+# hit only keeps a mapping in prompts longer; a false miss would drop a correct one.
 
 
 def _word_pattern(word: str) -> str:
     if not word[-1:].isalpha():
         return re.escape(word)
-    if len(word) >= _MIN_STEM_WORD:
-        return re.escape(word[:-_STEM_TRIM]) + rf"\w{{1,{_MAX_ENDING}}}"
-    # Short words take an ending of at most half their length: "лес" -> "лесу", "Lu" never
-    # "Lushan", "king" -> "kings" but never "kingdom".
-    max_ending = min(_MAX_ENDING, len(word) // 2)
-    return re.escape(word) + (rf"\w{{0,{max_ending}}}" if max_ending else "")
+    if len(word) >= 6:
+        # "church" -> "churches", "дракон" -> "драконом", "медведь" -> "медведями".
+        return re.escape(word[:-2]) + r"\w{1,4}"
+    if len(word) >= 4:
+        # "Алиса" -> "Алисой", "Волга" -> "Волге", "Анна" -> "Анну"; never "king" -> "kingdom".
+        return re.escape(word[:-1]) + r"\w{1,3}"
+    # Very short words keep their full form: "лес" -> "лесом", but "Lu" never "Lushan".
+    return re.escape(word) + rf"\w{{0,{min(2, len(word) - 1)}}}"
 
 
 def _inflection_tolerant_matcher(key: str) -> re.Pattern[str] | str:

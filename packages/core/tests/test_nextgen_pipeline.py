@@ -1929,9 +1929,44 @@ def test_chapter_hygiene_never_rewrites_names(tmp_path: Path, source: str, targe
         "老高": ("Gao",),
     }
     store.open_conflicts = lambda: [{"source": "白石", "proposed_target": "White Rock"}]
+    for term in (
+        GlossaryTerm(source="Moscow", target="Москва", type="place"),
+        GlossaryTerm(source="史密斯", target="Smith", type="person"),
+        GlossaryTerm(source="老高", target="Old Gao", type="person"),
+        GlossaryTerm(source="白石", target="White Stone", type="place"),
+    ):
+        store.upsert_term(term)
     seg = Segment(index=0, source=source, target=target)
     chapter = Chapter(index=0, title="Ch1", segments=[seg])
 
     service._apply_chapter_hygiene(store, chapter)
 
     assert seg.target == target
+
+
+def test_serial_chapters_pass_book_bible_variants_to_batches(tmp_path: Path):
+    """Probe-observed name variants are sparse-editor evidence on the serial path too."""
+    book = tmp_path / "novel.txt"
+    book.write_text(_PARALLEL_BOOK, encoding="utf-8")
+    orch = Orchestrator(
+        _parallel_config(tmp_path, chapter_concurrency=1),
+        client=FakeClient(handler=_parallel_handler([])),
+    )
+    original = orch._translation._bible_seed.ensure_seeded
+
+    def seeded(store, **kwargs):
+        original(store, **kwargs)
+        return {"行者": ("Walker",)}
+
+    orch._translation._bible_seed.ensure_seeded = seeded
+    plans: list = []
+    real_execute = orch._translation._batches.execute
+
+    def capture(plan, **kwargs):
+        plans.append(plan)
+        return real_execute(plan, **kwargs)
+
+    orch._translation._batches.execute = capture
+    orch.run(str(book))
+    assert plans
+    assert all(plan.variants_by_source == {"行者": ("Walker",)} for plan in plans)

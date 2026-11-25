@@ -134,6 +134,20 @@ class TestGlossaryAdherence:
         )
         assert not tracker.ignored(_term("Moon Forest", "Лунный лес"))
 
+    def test_short_declined_names_count_as_used(self):
+        tracker = GlossaryAdherence()
+        _observe(
+            tracker,
+            [
+                ("Alice came.", "Алиса пришла."),
+                ("He saw Alice.", "Он увидел Алису."),
+                ("With Alice.", "С Алисой."),
+                ("Without Alice.", "Без Алисы."),
+                ("About Alice.", "Об Алисе."),
+            ],
+        )
+        assert not tracker.ignored(_term("Alice", "Алиса"))
+
     def test_unspaced_scripts_match_targets_inside_running_text(self):
         tracker = GlossaryAdherence()
         _observe(
@@ -319,3 +333,35 @@ def test_a_resolved_mapping_is_the_users_and_always_sent(run):
     assert store.resolve_term("Doctor", "医生")
     orchestrator.run(str(source))
     assert _prompt_entries(client) == [["Alice", "Doctor"]] * 8
+
+
+@pytest.mark.parametrize(
+    ("target", "text", "used"),
+    [
+        # Declined and plural forms count as using the mapping.
+        ("Москва", "Он жил в Москве.", True),
+        ("Алиса", "Он говорил с Алисой.", True),
+        ("Анна", "Он увидел Анну.", True),
+        ("Мария", "Он ждал Марию.", True),
+        ("Волга", "Мы плыли по Волге.", True),
+        ("лес", "Он шёл лесом.", True),
+        ("дракон", "Он сражался с драконом.", True),
+        ("медведь", "Он встретился с медведями.", True),
+        ("church", "Two churches stood there.", True),
+        ("Schloss", "Die Mauern des Schlosses.", True),
+        ("king", "Two kings met.", True),
+        # Unrelated words that merely share a prefix do not.
+        ("court", "He could not leave.", False),
+        ("Count", "He returned to court.", False),
+        ("force", "She waited for an hour.", False),
+        ("manor", "A man walked by.", False),
+        ("world", "Not a word was spoken.", False),
+        ("thing", "This was all.", False),
+        ("king", "The kingdom fell.", False),
+        ("Lu", "An Lushan came.", False),
+    ],
+)
+def test_adherence_target_matching_boundaries(target: str, text: str, used: bool):
+    from wenyi_core.glossary.adherence import _found, _inflection_tolerant_matcher, _key
+
+    assert _found(_inflection_tolerant_matcher(_key(target)), _key(text)) is used

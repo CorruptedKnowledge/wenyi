@@ -185,6 +185,14 @@ def test_escaped_newline_repair_keeps_spaced_escape_notation_in_prose():
     assert repair_escaped_newlines("改行文字を表す記号。", target) == target
 
 
+@pytest.mark.parametrize(
+    "target",
+    [r"Use \n\n to separate paragraphs.", r"Line breaks are written as \n\n\n here."],
+)
+def test_escaped_newline_repair_never_half_converts_a_spaced_escape_run(target: str):
+    assert repair_escaped_newlines("改行を二つ使う。", target) == target
+
+
 def test_escaped_newline_repair_keeps_literal_escapes_the_source_also_has():
     # A programming book explaining escape sequences: the literal \n is content, not a leak.
     source = r"Write \n to start a new line."
