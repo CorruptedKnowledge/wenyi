@@ -29,6 +29,7 @@ pub struct Package {
     pub title: String,
     pub description: String,
     pub subjects: Vec<String>,
+    pub creators: Vec<String>,
     pub spine: Vec<Spec>,
     pub manifest: Vec<String>,
     pub toc_paths: Vec<String>,
@@ -76,6 +77,7 @@ pub fn package(zip: &mut Archive) -> Result<Package> {
     let mut title = String::new();
     let mut description = String::new();
     let mut subjects = Vec::new();
+    let mut creators = Vec::new();
     let mut split_nested_toc = false;
     let mut items = IndexMap::new();
     let (mut spine_ids, mut toc_ids, mut manifest) = (Vec::new(), Vec::new(), Vec::new());
@@ -96,6 +98,12 @@ pub fn package(zip: &mut Archive) -> Result<Package> {
                 let text = strip(n.text().unwrap_or(""));
                 if !text.is_empty() {
                     subjects.push(text.to_owned());
+                }
+            }
+            "creator" => {
+                let text = strip(n.text().unwrap_or(""));
+                if !text.is_empty() {
+                    creators.push(text.to_owned());
                 }
             }
             "item" => {
@@ -163,6 +171,7 @@ pub fn package(zip: &mut Archive) -> Result<Package> {
         title,
         description,
         subjects,
+        creators,
         spine,
         manifest,
         toc_paths,
@@ -245,20 +254,43 @@ impl Toc {
     }
 }
 
-pub fn nav_labels(dom: &Dom) -> Vec<(Id, Id, usize, Option<usize>)> {
-    let navs: Vec<_> = dom.tags(0).filter(|&id| dom.name(id) == "nav").collect();
-    let mut scopes: Vec<_> = navs
-        .iter()
-        .copied()
+fn toc_navs(dom: &Dom) -> Vec<Id> {
+    dom.tags(0)
+        .filter(|&id| dom.name(id) == "nav")
         .filter(|&id| {
             dom.attr(id, "epub:type")
                 .filter(|s| !s.is_empty())
                 .or(dom.attr(id, "type"))
                 .is_some_and(|s| s.split_whitespace().any(|s| s == "toc"))
         })
+        .collect()
+}
+
+/// The document `<title>` and the headings directly inside an `epub:type="toc"` nav.
+///
+/// These are the navigation document's own labels (for example "Contents"), as opposed to the
+/// per-entry labels returned by [`nav_labels`].
+pub fn nav_headings(dom: &Dom) -> Vec<Id> {
+    let mut nodes: Vec<Id> = dom
+        .find(0, "head")
+        .and_then(|head| dom.direct(head, "title"))
+        .into_iter()
         .collect();
+    for nav in toc_navs(dom) {
+        nodes.extend(
+            dom.children(nav)
+                .iter()
+                .copied()
+                .filter(|&n| matches!(dom.name(n), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")),
+        );
+    }
+    nodes
+}
+
+pub fn nav_labels(dom: &Dom) -> Vec<(Id, Id, usize, Option<usize>)> {
+    let mut scopes = toc_navs(dom);
     if scopes.is_empty() {
-        scopes.push(navs.first().copied().unwrap_or(0));
+        scopes.push(dom.tags(0).find(|&id| dom.name(id) == "nav").unwrap_or(0));
     }
     let mut labels = Vec::new();
     for scope in scopes {
@@ -319,7 +351,11 @@ pub fn ncx_points<'a, 'input>(
     points
 }
 
-fn toc_entries(zip: &mut Archive, paths: &[String]) -> Result<Vec<Toc>> {
+fn toc_entries(
+    zip: &mut Archive,
+    paths: &[String],
+    nav_titles: &mut Vec<String>,
+) -> Result<Vec<Toc>> {
     let mut out = Vec::new();
     for path in paths {
         if zip.index_for_name(path).is_none() {
@@ -383,6 +419,14 @@ fn toc_entries(zip: &mut Archive, paths: &[String]) -> Result<Vec<Toc>> {
             // Non-NCX navigation is HTML even when it has an unusual suffix.
             let text = if html { text } else { decode(&bytes) };
             let dom = Dom::parse(&text);
+            if !toc_navs(&dom).is_empty() {
+                for node in nav_headings(&dom) {
+                    let title = dom.text(node, " ", true);
+                    if !title.is_empty() && !nav_titles.contains(&title) {
+                        nav_titles.push(title);
+                    }
+                }
+            }
             out.extend(nav_labels(&dom).into_iter().enumerate().map(
                 |(idx, (li, label, depth, parent))| {
                     Toc::new(
@@ -653,7 +697,8 @@ fn locate_boundaries(
 pub fn ingest(path: &Path, source_lang: &str, target_lang: &str) -> Result<Vec<u8>> {
     let mut zip = open(path)?;
     let package = package(&mut zip)?;
-    let mut toc = toc_entries(&mut zip, &package.toc_paths)?;
+    let mut nav_titles = Vec::new();
+    let mut toc = toc_entries(&mut zip, &package.toc_paths, &mut nav_titles)?;
     let spine_paths: HashSet<_> = package.spine.iter().map(|s| s.href.as_str()).collect();
     let mut specs: Vec<_> = package
         .spine
@@ -782,6 +827,12 @@ pub fn ingest(path: &Path, source_lang: &str, target_lang: &str) -> Result<Vec<u
         }
         if !package.subjects.is_empty() {
             obj.insert("epub_subjects".to_owned(), json!(package.subjects));
+        }
+        if !package.creators.is_empty() {
+            obj.insert("epub_creators".to_owned(), json!(package.creators));
+        }
+        if !nav_titles.is_empty() {
+            obj.insert("epub_nav_titles".to_owned(), json!(nav_titles));
         }
     }
     Ok(serde_json::to_vec(&Document {

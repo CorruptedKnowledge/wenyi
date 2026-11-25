@@ -2545,6 +2545,100 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                 self.assertEqual(doc_title.find("text").get_text(), "Trafford & Sons Club")
                 self.assertEqual(ncx.find("navLabel").find("text").get_text(), "Chapter 1")
 
+    def test_epub_template_export_localizes_creator_nav_heading_and_package_lang(self):
+        """Author, nav-document heading and package language follow the target language."""
+        from wenyi_core.assemble.writer import assemble
+        from wenyi_core.ingest.epub_reader import read_epub
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_epub = os.path.join(tmp, "book.epub")
+            out_epub = os.path.join(tmp, "book.en.epub")
+            with zipfile.ZipFile(src_epub, "w") as zf:
+                zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+                zf.writestr(
+                    "META-INF/container.xml",
+                    '<?xml version="1.0"?><container version="1.0" '
+                    'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                    '<rootfiles><rootfile full-path="OEBPS/content.opf" '
+                    'media-type="application/oebps-package+xml"/></rootfiles></container>',
+                )
+                zf.writestr(
+                    "OEBPS/content.opf",
+                    '<?xml version="1.0" encoding="utf-8"?>'
+                    '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+                    'unique-identifier="id" xml:lang="zh-CN">'
+                    '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                    '<dc:identifier id="id">urn:uuid:1</dc:identifier>'
+                    "<dc:title>特拉福买家俱乐部</dc:title><dc:creator>夕山白石</dc:creator>"
+                    "<dc:publisher>某出版社</dc:publisher><dc:language>zh</dc:language>"
+                    "</metadata><manifest>"
+                    '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" '
+                    'properties="nav"/>'
+                    '<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>'
+                    '</manifest><spine><itemref idref="c1"/></spine></package>',
+                )
+                zf.writestr(
+                    "OEBPS/nav.xhtml",
+                    '<?xml version="1.0" encoding="utf-8"?>'
+                    '<html xmlns="http://www.w3.org/1999/xhtml" '
+                    'xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head>'
+                    '<body><nav epub:type="toc"><h1>目录</h1><ol>'
+                    '<li><a href="ch1.xhtml">第一章</a></li></ol></nav></body></html>',
+                )
+                zf.writestr(
+                    "OEBPS/ch1.xhtml",
+                    '<?xml version="1.0" encoding="utf-8"?>'
+                    '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>第一章</title></head>'
+                    "<body><h1>第一章</h1><p>正文。</p><p>第一行\n第二行</p></body></html>",
+                )
+
+            doc = read_epub(src_epub, source_lang="zh", target_lang="en")
+            self.assertEqual(doc.meta["epub_creators"], ["夕山白石"])
+            self.assertEqual(doc.meta["epub_nav_titles"], ["目录"])
+            store = FileStorage(os.path.join(tmp, "state"))
+            store.init_from_document(doc)
+            manifest = store.load_manifest()
+            manifest["title_translated"] = "The Trafford Buyers Club"
+            manifest["meta"]["epub_creators_translated"] = ["Xishan Baishi"]
+            manifest["meta"]["epub_nav_titles_translated"] = ["Contents"]
+            manifest["chapters"][0]["title_translated"] = "Chapter 1"
+            for entry in manifest["meta"]["toc_entries"]:
+                entry["title_translated"] = "Chapter 1"
+            store.save_manifest(manifest)
+            ch = store.load_chapter(0)
+            # Models sometimes move a source line break to the edge of the translation.
+            targets = {"heading": "Chapter 1"}
+            body = iter(["Body text.\n", "First line\nsecond line"])
+            for seg in ch.segments:
+                seg.target = targets.get(seg.kind) or next(body)
+            store.save_chapter(ch)
+
+            assemble(store, src_epub, out_epub, out_format="epub")
+
+            with zipfile.ZipFile(out_epub, "r") as zf:
+                opf = BeautifulSoup(zf.read("OEBPS/content.opf"), "xml")
+                nav = BeautifulSoup(zf.read("OEBPS/nav.xhtml"), "html.parser")
+                ch1 = BeautifulSoup(zf.read("OEBPS/ch1.xhtml"), "html.parser")
+            package = opf.find("package")
+            assert isinstance(package, Tag)
+            self.assertEqual(package.get("xml:lang"), "en")
+            creator = opf.find("dc:creator")
+            assert isinstance(creator, Tag)
+            self.assertEqual((creator.get_text(), creator.get("xml:lang")), ("Xishan Baishi", "en"))
+            # Untranslated metadata keeps the source label it previously inherited.
+            publisher = opf.find("dc:publisher")
+            assert isinstance(publisher, Tag)
+            self.assertEqual(
+                (publisher.get_text(), publisher.get("xml:lang")), ("某出版社", "zh-CN")
+            )
+            self.assertIsNone(opf.find("dc:identifier").get("xml:lang"))
+            self.assertEqual(nav.find("title").get_text(), "Contents")
+            self.assertEqual(nav.find("h1").get_text(), "Contents")
+            self.assertEqual(nav.find("a").get_text(), "Chapter 1")
+            paragraphs = ch1.find_all("p")
+            self.assertEqual(str(paragraphs[0]), "<p>Body text.</p>")
+            self.assertEqual(len(paragraphs[1].find_all("br")), 1)
+
 
 class TestEpubHrefWarnings(unittest.TestCase):
     """Unresolved EPUB hrefs are recorded as queryable warnings, never silently dropped."""

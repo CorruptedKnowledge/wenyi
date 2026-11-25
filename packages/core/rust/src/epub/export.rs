@@ -20,7 +20,7 @@ use super::{
     archive::{open, read, rewrite, Archive},
     dom::{decode, decode_xml, escape, strip, Dom, Id, Kind},
     extract::{annotate, FragmentIndex, Resource, ANCHOR, ANNOTATION, INLINE, LINE, OBJECT},
-    ingest::{nav_labels, ncx_points, xml, Spec},
+    ingest::{nav_headings, nav_labels, ncx_points, xml, Spec},
     links::{is_html, resolve},
     tokenizer::xml_encoding,
     workers::ordered_map,
@@ -59,6 +59,12 @@ pub struct Presentation {
     pub description: Option<String>,
     #[serde(default)]
     pub subjects: Vec<String>,
+    /// Translated `dc:creator` values, aligned by position with the non-empty source creators.
+    #[serde(default)]
+    pub creators: Vec<String>,
+    /// Source navigation-document labels ("目录") mapped to their translations.
+    #[serde(default)]
+    pub nav_titles: HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -431,7 +437,7 @@ pub(crate) fn backfill(
         .map_or(&[][..], Vec::as_slice);
     if records.is_empty() && items.is_empty() {
         dom.clear(el);
-        breaks(dom, el, text);
+        breaks(dom, el, text.trim_matches(['\r', '\n']));
         return Ok(());
     }
     let offsets: Vec<_> = text
@@ -735,6 +741,24 @@ fn rewrite_nav(dom: &mut Dom, path: &str, options: &Options) {
         })
     {
         return;
+    }
+    if let Some(titles) = options
+        .presentation
+        .as_ref()
+        .map(|p| &p.nav_titles)
+        .filter(|t| !t.is_empty())
+    {
+        for node in nav_headings(dom) {
+            if let Some(title) = titles
+                .get(&dom.text(node, " ", true))
+                .map(|s| strip(s))
+                .filter(|s| !s.is_empty())
+            {
+                let title = title.to_owned();
+                dom.clear(node);
+                dom.append_text(node, &title);
+            }
+        }
     }
     let entries: HashMap<_, _> = options
         .toc_entries
@@ -1139,8 +1163,11 @@ fn rewrite_xml(
                 .or_else(|| doc.descendants().find(|n| n.has_tag_name(name)))
         };
         let p = options.presentation.as_ref()?;
+        // Metadata nodes now carrying target-language text.
+        let mut localized = HashSet::new();
         if !p.title.is_empty() {
             if let Some(n) = field("title") {
+                localized.insert(n.id());
                 if p.original_title.is_some() {
                     translate_opf_field(&text, n, &p.title, &p.lang, &mut edits);
                 } else {
@@ -1186,6 +1213,7 @@ fn rewrite_xml(
             .filter(|s| !s.is_empty())
         {
             if let Some(n) = field("description") {
+                localized.insert(n.id());
                 translate_opf_field(&text, n, desc, &p.lang, &mut edits);
             }
         }
@@ -1207,7 +1235,70 @@ fn rewrite_xml(
             for (node, translated) in subject_nodes.into_iter().zip(p.subjects.iter()) {
                 let value = strip(translated);
                 if !value.is_empty() {
+                    localized.insert(node.id());
                     translate_opf_field(&text, node, value, &p.lang, &mut edits);
+                }
+            }
+        }
+        if !p.creators.is_empty() {
+            let mut creator_nodes: Vec<_> = doc
+                .descendants()
+                .filter(|n| {
+                    n.has_tag_name((DC, "creator")) && !strip(n.text().unwrap_or("")).is_empty()
+                })
+                .collect();
+            if creator_nodes.is_empty() {
+                creator_nodes = doc
+                    .descendants()
+                    .filter(|n| {
+                        n.has_tag_name("creator") && !strip(n.text().unwrap_or("")).is_empty()
+                    })
+                    .collect();
+            }
+            let primary = |lang: &str| {
+                lang.split(['-', '_'])
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+            };
+            let target = primary(&p.lang);
+            for (node, translated) in creator_nodes.into_iter().zip(p.creators.iter()) {
+                let value = strip(translated);
+                // A name already tagged in the target language is kept as published.
+                let tagged_target = node
+                    .attribute(("http://www.w3.org/XML/1998/namespace", "lang"))
+                    .is_some_and(|lang| primary(lang) == target);
+                if !value.is_empty() && !tagged_target {
+                    localized.insert(node.id());
+                    translate_opf_field(&text, node, value, &p.lang, &mut edits);
+                }
+            }
+        }
+        // The package default language would otherwise keep labelling untagged metadata
+        // (such as a translated title) as the source language. Untagged metadata that stays
+        // untranslated keeps the source default through an explicit attribute.
+        const XML: &str = "http://www.w3.org/XML/1998/namespace";
+        if let Some(lang) = doc.root_element().attribute_node((XML, "lang")) {
+            if lang.value() != p.lang {
+                let mut escaped = String::new();
+                escape(&mut escaped, &p.lang, true);
+                edits.push((lang.range_value(), escaped));
+                let mut source_lang = String::new();
+                escape(&mut source_lang, lang.value(), true);
+                for node in doc.descendants().filter(|n| {
+                    n.is_element()
+                        && n.tag_name().namespace() == Some(DC)
+                        && !matches!(n.tag_name().name(), "identifier" | "language" | "date")
+                        && !localized.contains(&n.id())
+                        && n.attribute_node((XML, "lang")).is_none()
+                        && !strip(n.text().unwrap_or("")).is_empty()
+                }) {
+                    let range = node.range();
+                    let at = range.start
+                        + text[range]
+                            .find(|c: char| c.is_whitespace() || matches!(c, '/' | '>'))
+                            .unwrap();
+                    edits.push((at..at, format!(" xml:lang=\"{source_lang}\"")));
                 }
             }
         }

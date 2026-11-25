@@ -298,6 +298,29 @@ def test_title_string_conversion_and_empty_fallback_remain_unchanged(title_proje
     ]
 
 
+def test_plan_titles_queues_epub_creators_and_nav_titles():
+    manifest = {
+        "title": "特拉福买家俱乐部",
+        "fmt": "epub",
+        "chapters": [],
+        "meta": {
+            "opf_path": "OEBPS/content.opf",
+            "book_title_translated": "The Trafford Buyers Club",
+            "epub_creators": ["夕山白石"],
+            "epub_nav_titles": ["目录"],
+        },
+    }
+    plan = plan_titles(manifest, {})
+    assert [(item.field, item.source, item.list_index) for item in plan.pending] == [
+        ("epub_creators_translated", "夕山白石", 0),
+        ("epub_nav_titles_translated", "目录", 0),
+    ]
+    plan.apply(plan.pending, ["Xishan Baishi", "Contents"])
+    assert plan.manifest["meta"]["epub_creators_translated"] == ["Xishan Baishi"]
+    assert plan.manifest["meta"]["epub_nav_titles_translated"] == ["Contents"]
+    assert plan_titles(plan.manifest, {}).pending == []
+
+
 def test_plan_titles_scopes_opf_metadata_and_handles_subject_resume():
     manifest = {
         "title": "Shadow Empire",
