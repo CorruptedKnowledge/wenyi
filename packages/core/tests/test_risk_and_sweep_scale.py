@@ -472,7 +472,6 @@ def test_drift_ignores_inflection_splits_but_keeps_real_synonym_splits():
             chapters,
             source_lang="zh",
             target_lang="en",
-            existing_glossary_sources=set(),
             extra_watch_sources={"征召": (), "幕僚": ()},
         )
     }
@@ -482,14 +481,9 @@ def test_drift_ignores_inflection_splits_but_keeps_real_synonym_splits():
 
 def test_drift_only_checks_book_bible_watched_sources():
     """Unwatched n-grams are never mined, so no per-language vocabulary lists are needed."""
-    ch0, ch1 = _split_rows("机会", "chance", "opportunity", 8)
+    ch0, ch1 = _split_rows("幕僚", "adviser", "retainer", 8)
     chapters = _chapters([ch0, ch1])
-    assert (
-        detect_mid_frequency_drift(
-            chapters, source_lang="zh", target_lang="en", existing_glossary_sources=set()
-        )
-        == []
-    )
+    assert detect_mid_frequency_drift(chapters, source_lang="zh", target_lang="en") == []
     # The same split is reported once the Book Bible flags the source as divergent, for any
     # source language.
     for lang in ("zh", "ja"):
@@ -497,10 +491,9 @@ def test_drift_only_checks_book_bible_watched_sources():
             chapters,
             source_lang=lang,
             target_lang="en",
-            existing_glossary_sources=set(),
-            extra_watch_sources={"机会": ("chance", "opportunity")},
+            extra_watch_sources={"幕僚": ("the adviser", "the retainer")},
         )
-        assert [c.source for c in watched] == ["机会"]
+        assert [c.source for c in watched] == ["幕僚"]
 
 
 def _split_rows(
@@ -525,7 +518,6 @@ def test_drift_ranking_prefers_title_signal_over_raw_frequency():
         chapters,
         source_lang="zh",
         target_lang="en",
-        existing_glossary_sources=set(),
         extra_watch_sources={"国主": (), "宰辅": (), "棋局": ()},
     )
     order = [c.source for c in ranked]
@@ -535,7 +527,6 @@ def test_drift_ranking_prefers_title_signal_over_raw_frequency():
         chapters,
         source_lang="zh",
         target_lang="en",
-        existing_glossary_sources=set(),
         max_clusters=1,
         extra_watch_sources={"国主": (), "宰辅": (), "棋局": ()},
     )
@@ -553,8 +544,7 @@ def test_drift_handles_ies_and_ie_plurals_names_and_longer_terms():
             + [("手里剑", "He threw a shuriken swiftly.")] * 3
             + [("地方官", "The magistrate arrived.")] * 3
             + [("朋友圈", "She checked her feed.")] * 3
-            + [("事务所", "The agency closed early.")] * 3
-            + [("特权阶级", "The privileged elite ruled.")] * 3,
+            + [("事务所", "The agency closed early.")] * 3,
             [("敌人", "The enemies waited.")] * 3
             + [("女武", "The valkyries landed.")] * 3
             + [("公主", "The princesses arrived.")] * 3
@@ -563,8 +553,7 @@ def test_drift_handles_ies_and_ie_plurals_names_and_longer_terms():
             + [("手里剑", "He threw a dart swiftly.")] * 3
             + [("地方官", "The prefect arrived.")] * 3
             + [("朋友圈", "She checked her timeline.")] * 3
-            + [("事务所", "The firm closed early.")] * 3
-            + [("特权阶级", "The privileged caste ruled.")] * 3,
+            + [("事务所", "The firm closed early.")] * 3,
         ],
         filler=20,
     )
@@ -583,7 +572,6 @@ def test_drift_handles_ies_and_ie_plurals_names_and_longer_terms():
         chapters,
         source_lang="zh",
         target_lang="en",
-        existing_glossary_sources=set(),
         extra_watch_sources=watch,
     )
     sources = [c.source for c in clusters]
@@ -600,7 +588,6 @@ def test_drift_handles_ies_and_ie_plurals_names_and_longer_terms():
             chapters,
             source_lang="zh",
             target_lang="en",
-            existing_glossary_sources=set(),
             max_clusters=0,
             extra_watch_sources=watch,
         )
@@ -667,3 +654,87 @@ def test_sparse_editor_sends_unlineated_verse_alert_once():
     assert prompts
     assert "[Verse formatting alert]" not in prompts[-1]
     assert prompts[-1].count("unlineated_verse") == 1
+
+
+def test_drift_split_must_involve_a_probe_rendering():
+    """A watched title's split is anchored to the Book Bible's own renderings."""
+    rows0 = [("Le roi entra au château.", "The king entered the castle.")] * 3
+    rows1 = [("Le roi entra au palais.", "The king entered the palace.")] * 3
+    chapters = _chapters([rows0, rows1])
+    found = detect_mid_frequency_drift(
+        chapters,
+        source_lang="fr",
+        target_lang="en",
+        extra_watch_sources={"roi": ("the king", "the monarch")},
+    )
+    assert found == []
+
+
+def test_drift_keeps_one_slot_for_overlapping_watched_titles():
+    rows0 = [("事务所关门了。", "The agency closed early.")] * 3
+    rows1 = [("事务所关门了。", "The firm closed early.")] * 3
+    clusters = detect_mid_frequency_drift(
+        _chapters([rows0, rows1]),
+        source_lang="zh",
+        target_lang="en",
+        extra_watch_sources={"事务": (), "事务所": ()},
+    )
+    assert len(clusters) == 1
+
+
+def test_consistency_sweep_checks_watched_titles_that_are_also_in_the_glossary(tmp_path):
+    from unittest.mock import Mock
+
+    from wenyi_core.pipeline.translate.consistency_sweep import ConsistencySweepService
+    from wenyi_core.storage.file import FileStorage
+
+    store = FileStorage(str(tmp_path / "state"), create=True)
+    rows0 = [("国主下旨。", "Then the sovereign waited.")] * 3
+    rows1 = [("国主下旨。", "Then the king waited.")] * 3
+    for chapter in _chapters([rows0, rows1]):
+        store.save_chapter(chapter)
+    editor = Mock()
+    editor.adjudicate_drift.return_value = {}
+    svc = ConsistencySweepService(editor, source_lang="zh", target_lang="en")
+    svc.run(
+        store,
+        chapter_indices=[0, 1],
+        # A generic title the glossary-miss pass skips, so only drift detection can see it.
+        terms=[GlossaryTerm(source="国主", target="the king", type="term")],
+        divergent_titles={"国主": ("the sovereign", "the king")},
+    )
+    clusters = editor.adjudicate_drift.call_args.args[0]
+    assert [c["source"] for c in clusters] == ["国主"]
+
+
+def test_verse_alert_keeps_its_slot_in_a_full_alert_budget():
+    sources = ["白日依山尽，黄河入海流。", "欲穷千里目，更上一层楼。"] + [
+        f"他第{i}次走了。" for i in range(6)
+    ]
+    drafts = [
+        "The white sun sets behind the hills; the Yellow River flows into the sea.",
+        "To see a thousand miles, climb one more storey.",
+    ] + [f"He left 走 for time {i}." for i in range(6)]
+    report = assess_batch_risk(sources, drafts, source_lang="zh", target_lang="en")
+    assert sum(a.code == "script_residue" for a in report.alerts) == 6
+    assert "unlineated_verse" in report.format_prompt_alerts(max_items=6)
+
+
+def test_style_guard_rejects_large_chinese_deletions():
+    from wenyi_core.agents.sparse_editor import _is_gratuitous_style_churn
+
+    clauses = [f"他沿着{chr(0x5C71 + i)}路慢慢走" for i in range(22)]
+    draft = "，".join(clauses) + "。"
+    assert _is_gratuitous_style_churn(draft, "，".join(clauses[:4]) + "。", "fluency") is True
+
+
+def test_inline_gloss_markers_come_from_the_target_language():
+    def flagged(draft: str, target_lang: str) -> bool:
+        report = assess_batch_risk(["他点头。"], [draft], source_lang="zh", target_lang=target_lang)
+        return any(a.code == "inline_gloss" for a in report.alerts)
+
+    assert not flagged("It was a good (meaningful) choice.", "en")
+    assert flagged("Il hocha la tête (litt. « oui »).", "fr")
+    assert flagged("他点头（直译为“是”）。", "zh")
+    # A language without markers in its profile gets no inline-gloss alert.
+    assert not flagged("그는 고개를 끄덕였다 (lit. yes).", "ko")

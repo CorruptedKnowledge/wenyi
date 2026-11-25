@@ -24,10 +24,10 @@ from dataclasses import dataclass
 
 from ...agents.batch_risk import _is_generic, _target_contains_term
 from ...agents.sparse_editor import SparseSemanticEditor
-from ...glossary.store import STATUS_OK, normalize_match_text, source_matches_text
+from ...glossary.store import STATUS_OK, source_matches_text
 from ...i18n.languages import glossary_generic_target_words
 from ...models.document import Chapter, Segment
-from ...models.glossary import TYPE_NAVIGATION, GlossaryTerm
+from ...models.glossary import GlossaryTerm
 from ...storage.protocol import Storage
 
 _LOGGER = logging.getLogger(__name__)
@@ -316,15 +316,17 @@ def detect_mid_frequency_drift(
     *,
     source_lang: str,
     target_lang: str,
-    existing_glossary_sources: set[str],
     max_clusters: int = 12,
     extra_watch_sources: Mapping[str, Sequence[str]] | None = None,
 ) -> list[DriftCluster]:
     """Detect split English renderings of recurring titles the Book Bible flagged as divergent.
 
-    Only watched sources (``extra_watch_sources``, from the Bible's dual-probe divergence) are
-    checked. Mining every source n-gram needed hand-curated per-language word lists to filter
-    noise, which only held for the books they were tuned on.
+    Only watched sources (``extra_watch_sources``: source -> the Bible's divergent probe
+    renderings) are checked, including ones that also have a glossary entry, since the glossary
+    pass cannot see a capitalization split or a generic title. When probe renderings are given,
+    a split must involve one of them, so co-occurring words such as "castle"/"palace" are never
+    reported for a title. Mining every source n-gram needed hand-curated per-language word lists
+    to filter noise, which only held for the books they were tuned on.
     """
     del source_lang  # Watched sources come from the Bible for any source language.
     tgt_base = (target_lang or "").lower().split("-", 1)[0]
@@ -332,12 +334,22 @@ def detect_mid_frequency_drift(
     if tgt_base != "en" or max_clusters <= 0 or not watch_map:
         return []
 
-    norm_existing = {normalize_match_text(s).strip() for s in existing_glossary_sources}
-    watched = [
-        src
-        for src in watch_map
-        if src.strip() and normalize_match_text(src).strip() not in norm_existing
-    ]
+    watched = [src for src in watch_map if src.strip()]
+    anchors_by_source = {
+        src: {
+            _norm_en_word(word)
+            for rendering in watch_map[src]
+            for word in _EN_CONTENT_WORD_RE.findall(rendering or "")
+            if word.casefold() not in _EN_STOPWORDS
+        }
+        for src in watched
+    }
+
+    def anchored(gram: str, *words: str) -> bool:
+        anchors = anchors_by_source.get(gram)
+        if not anchors:
+            return True
+        return any(_same_en_lemma(word, anchor) for word in words for anchor in anchors)
 
     term_paras: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
     term_chapters: dict[str, set[int]] = defaultdict(set)
@@ -414,7 +426,7 @@ def detect_mid_frequency_drift(
             ):
                 distinctive.append((word, cnt))
 
-        if len(distinctive) >= 2:
+        if len(distinctive) >= 2 and anchored(gram, distinctive[0][0], distinctive[1][0]):
             # Check mutual exclusivity of top two distinctive target words (split rendering signal!).
             (w1, c1), (w2, c2) = distinctive[0], distinctive[1]
             both = sum(1 for lemmas in lemma_sets if w1 in lemmas and w2 in lemmas)
@@ -446,7 +458,7 @@ def detect_mid_frequency_drift(
         # (e.g. "the King" in Ch 1 vs "the king" in Ch 2) that case-folding hides.
         if word_counts:
             top_word, top_cnt = word_counts.most_common(1)[0]
-            if top_cnt >= 3 and (top_cnt / n_occ) >= 0.40:
+            if top_cnt >= 3 and (top_cnt / n_occ) >= 0.40 and anchored(gram, top_word):
                 cap_hits = 0
                 low_hits = 0
                 cap_chs: set[int] = set()
@@ -614,7 +626,6 @@ class ConsistencySweepService:
             chapters,
             source_lang=self._src,
             target_lang=self._tgt,
-            existing_glossary_sources={t.source for t in terms if t.type != TYPE_NAVIGATION},
             extra_watch_sources=divergent_titles,
         )
         drift_patched = 0

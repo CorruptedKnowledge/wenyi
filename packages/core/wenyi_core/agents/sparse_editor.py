@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -77,28 +78,35 @@ class SparseEditResult:
     failed: bool = False
 
 
-# Unspaced scripts have no word boundaries, so each character counts as one token; otherwise a
-# whole Chinese clause would be a single "word" and any edit to it would look like a rewrite.
-_UNSPACED_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]")
+# Scripts written without spaces between words (Chinese, Japanese, Thai, Lao, Khmer, Burmese)
+# have no word boundaries, so each character counts as one token; otherwise a whole clause
+# would be a single "word" and any edit to it would look like a rewrite. Korean is spaced.
+_UNSPACED = (
+    "\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\u0e00-\u0e7f\u0e80-\u0eff\u1000-\u109f\u1780-\u17ff"
+)
+_TOKEN_PIECE_RE = re.compile(rf"[{_UNSPACED}]|[^{_UNSPACED}]+")
+_UNSPACED_CHAR_RE = re.compile(rf"[{_UNSPACED}]")
 
 
 def _content_tokens(text: str) -> list[str]:
     tokens: list[str] = []
     for word in _WORD_RE.findall(text):
-        if _UNSPACED_CHAR_RE.search(word):
-            tokens.extend(word)
-        else:
-            tokens.append(word.casefold())
+        for piece in _TOKEN_PIECE_RE.findall(word):
+            tokens.append(piece if _UNSPACED_CHAR_RE.match(piece) else piece.casefold())
     return tokens
 
 
 def _token_overlap_ratio(a: str, b: str) -> float:
-    """Return Jaccard overlap of content tokens (used to guard against gratuitous style churn)."""
-    ta = set(_content_tokens(a))
-    tb = set(_content_tokens(b))
+    """Return count-aware overlap of content tokens (guards against gratuitous style churn).
+
+    Counting repeats matters for per-character tokens: a large deletion keeps a small subset
+    of the same characters, which a set comparison would score as nearly identical.
+    """
+    ta = Counter(_content_tokens(a))
+    tb = Counter(_content_tokens(b))
     if not ta or not tb:
         return 1.0
-    return len(ta & tb) / max(len(ta), len(tb))
+    return sum((ta & tb).values()) / max(sum(ta.values()), sum(tb.values()))
 
 
 def _is_gratuitous_style_churn(draft: str, candidate: str, reason: str) -> bool:

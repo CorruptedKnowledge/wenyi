@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from ..glossary.store import STATUS_OK, normalize_match_text, source_matches_normalized
-from ..i18n.languages import glossary_generic_target_words
+from ..i18n.languages import glossary_generic_target_words, inline_gloss_markers
 from ..ingest.segmenter import verse_block_indices
 from ..models.glossary import GlossaryTerm
 
@@ -29,13 +29,6 @@ _CJK_CHAR_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
 _KANA_CHAR_RE = re.compile(r"[\u3040-\u30ff]")
 _FURIGANA_RESIDUE_RE = re.compile(r"〘(?!object:)[^〙]+〙")
 _WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
-# Translator's notes inserted inline ("(lit. ...)", "(meaning ...)"). A plain parenthetical is
-# ordinary prose in many styles (a dash aside rendered with parentheses, an academic gloss), so
-# only an explicit gloss marker counts.
-_PAREN_GLOSS_RE = re.compile(
-    r"\((?:lit\.|literally|i\.e\.|meaning|which means|translator'?s? note|TN:)[^()]{2,80}\)",
-    re.IGNORECASE,
-)
 _HALFWIDTH_IN_CJK_RE = re.compile(r"[\u4e00-\u9fff][,?!;:][\u4e00-\u9fff]")
 
 # Embedded classical/literary poem/lyric signals inside a prose paragraph.
@@ -78,13 +71,43 @@ class BatchRiskReport:
         """Render a compact, bounded pre-screen hint block for ``SparseSemanticEditor``."""
         if not self.alerts:
             return ""
-        # Prioritize high-severity alerts first, keeping original paragraph order within ties.
-        ranked = sorted(self.alerts, key=lambda a: (not a.high_severity, a.index))[:max_items]
+        # The grouped verse alert names a whole poem's paragraphs and has no other carrier, so it
+        # always keeps a slot; the rest are ranked high-severity first, in paragraph order.
+        reserved = [a for a in self.alerts if a.code == "unlineated_verse"]
+        others = [a for a in self.alerts if a.code != "unlineated_verse"]
+        ranked = (
+            sorted(others, key=lambda a: (not a.high_severity, a.index))[
+                : max(0, max_items - len(reserved))
+            ]
+            + reserved
+        )
         ranked.sort(key=lambda a: a.index)
         lines = ["[Pre-screen alerts — verify these specific paragraphs carefully before deciding]"]
         for alert in ranked:
             lines.append(f"- [{alert.index}] ({alert.code}): {alert.detail}")
         return "\n".join(lines)
+
+
+@lru_cache(maxsize=64)
+def _inline_gloss_re(target_lang: str) -> re.Pattern[str] | None:
+    """Match a translator's note opened by the target language's own marker ("(lit. ...)").
+
+    A plain parenthetical is ordinary prose in many styles (a dash aside rendered with
+    parentheses, an academic gloss), so only an explicit marker counts. A marker must end at a
+    word boundary, so "(meaningful ...)" is not a note.
+    """
+    markers = inline_gloss_markers(target_lang)
+    if not markers:
+        return None
+
+    def marker_pattern(marker: str) -> str:
+        # Spaced scripts need a word boundary after the marker; unspaced scripts have none.
+        last = marker[-1]
+        bounded = last.isalpha() and not _CJK_CHAR_RE.match(last) and not _KANA_CHAR_RE.match(last)
+        return re.escape(marker) + (r"(?![^\W\d_])" if bounded else "")
+
+    alternatives = "|".join(marker_pattern(m) for m in sorted(markers, key=len, reverse=True))
+    return re.compile(rf"[(（]\s*(?:{alternatives})[^()（）]{{1,80}}[)）]", re.IGNORECASE)
 
 
 def _strip_protected(text: str) -> str:
@@ -254,6 +277,7 @@ def assess_batch_risk(
     src_base = (source_lang or "").lower().split("-", 1)[0]
     tgt_base = (target_lang or "").lower().split("-", 1)[0]
     generic_words = glossary_generic_target_words(target_lang)
+    gloss_re = _inline_gloss_re(target_lang)
     variants_map = variants_by_source or {}
 
     # Filter glossary terms to high-signal entity mappings for miss detection. Navigation
@@ -334,7 +358,12 @@ def assess_batch_risk(
             )
 
         # 2. Unrequested parenthetical gloss (when source has no parentheses)
-        if "(" not in src and "（" not in src and _PAREN_GLOSS_RE.search(clean_drf):
+        if (
+            gloss_re is not None
+            and "(" not in src
+            and "（" not in src
+            and gloss_re.search(clean_drf)
+        ):
             alerts.append(
                 ParagraphAlert(
                     idx,
