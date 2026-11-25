@@ -29,7 +29,13 @@ _CJK_CHAR_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
 _KANA_CHAR_RE = re.compile(r"[\u3040-\u30ff]")
 _FURIGANA_RESIDUE_RE = re.compile(r"〘(?!object:)[^〙]+〙")
 _WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
-_PAREN_GLOSS_RE = re.compile(r"\((?:lit\.|literally|i\.e\.|meaning|a |the )?[^()]{4,60}\)")
+# Translator's notes inserted inline ("(lit. ...)", "(meaning ...)"). A plain parenthetical is
+# ordinary prose in many styles (a dash aside rendered with parentheses, an academic gloss), so
+# only an explicit gloss marker counts.
+_PAREN_GLOSS_RE = re.compile(
+    r"\((?:lit\.|literally|i\.e\.|meaning|which means|translator'?s? note|TN:)[^()]{2,80}\)",
+    re.IGNORECASE,
+)
 _HALFWIDTH_IN_CJK_RE = re.compile(r"[\u4e00-\u9fff][,?!;:][\u4e00-\u9fff]")
 
 # Embedded classical/literary poem/lyric signals inside a prose paragraph.
@@ -41,11 +47,10 @@ _EMBEDDED_ZH_VERSE_RE = re.compile(
     r"声声慢|聲聲慢|如梦令|如夢令|浪淘沙|江城子|青玉案|定风波|定風波)》|"
     r"(?:诗曰|詩曰|词曰|詞曰|偈曰|赞曰|讚曰|歌曰|有诗为证|有詩為證|(?<![沉吟呻])吟道|唱道)[：:，,]?\s*[「『“\"])"
 )
+# Only explicit poetry words introduce verse; "it was written" (記されていた) or a quote with
+# spaces in it (「New York Times」) is ordinary prose.
 _EMBEDDED_JA_VERSE_RE = re.compile(
-    r"(?:短歌|俳句|和歌|詠んだ|歌った|記されていた)[^「『]{0,24}[「『][^」』]{12,60}[」』]"
-)
-_JA_TANKA_QUOTE_RE = re.compile(
-    r"[「『][^」』\n]{3,10}[\s　]+[^」』\n]{4,10}[\s　]+[^」』\n]{3,10}[」』]"
+    r"(?:短歌|俳句|和歌|詠んだ|歌った)[^「『]{0,24}[「『][^」』]{12,60}[」』]"
 )
 
 # Pure Chinese numeral glossary names (e.g. 十一 -> Eleven) should not match inside chapter
@@ -53,12 +58,7 @@ _JA_TANKA_QUOTE_RE = re.compile(
 _ZH_NUMERAL_ONLY_RE = re.compile(r"^[零〇一二三四五六七八九十百千万萬亿億两兩]+$")
 _ZH_NUMERAL_LEFT_BOUNDARY = frozenset("第零〇一二三四五六七八九十百千万萬亿億两兩")
 _ZH_NUMERAL_RIGHT_BOUNDARY = frozenset(
-    "零〇一二三四五六七八九十百千万萬亿億章节節卷集篇幕年月日天时時分秒点點岁歲个個名位人件条條次遍倍成斤两兩米尺丈里元块塊钱錢"
-)
-# Common characters forming return/reply verb compounds after 回 (e.g. 十一回头 / 十一回到),
-# distinguishing character-name subjects from counts like 十一回才找到 or 十一回合.
-_ZH_HUI_VERB_NEXT = frozenset(
-    "头頭到来來去答回应應复復覆身望忆憶想首眸道话話礼禮敬绝絕看转轉返归歸神"
+    "零〇一二三四五六七八九十百千万萬亿億章节節卷集篇幕年月日天时時分秒点點岁歲个個名位人件条條次遍倍成斤两兩米尺丈里元块塊钱錢回"
 )
 
 
@@ -211,7 +211,7 @@ def has_embedded_verse(source: str, *, source_lang: str) -> bool:
     if base == "zh":
         return bool(_EMBEDDED_ZH_VERSE_RE.search(source))
     if base == "ja":
-        return bool(_EMBEDDED_JA_VERSE_RE.search(source) or _JA_TANKA_QUOTE_RE.search(source))
+        return bool(_EMBEDDED_JA_VERSE_RE.search(source))
     return False
 
 
@@ -234,14 +234,7 @@ def _glossary_source_matches(term_source: str, norm_text: str, *, src_base: str)
         if end >= len(norm_text):
             right_ok = True
         else:
-            next_ch = norm_text[end]
-            if next_ch in _ZH_NUMERAL_RIGHT_BOUNDARY:
-                right_ok = False
-            elif next_ch == "回":
-                after_hui = norm_text[end + 1] if end + 1 < len(norm_text) else ""
-                right_ok = after_hui in _ZH_HUI_VERB_NEXT
-            else:
-                right_ok = True
+            right_ok = norm_text[end] not in _ZH_NUMERAL_RIGHT_BOUNDARY
         if left_ok and right_ok:
             return True
         start = pos + 1

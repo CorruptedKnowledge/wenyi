@@ -389,6 +389,7 @@ def test_consistency_sweep_drift_not_suppressed_by_navigation_title(tmp_path):
             store,
             chapter_indices=[0, 1],
             terms=[_nav("第12章 公爵的密信", "Chapter 12: The Secret Letter")],
+            divergent_titles={"公爵": ("the Duke", "the Marquess")},
         )
         assert editor.adjudicate_drift.called
         clusters = editor.adjudicate_drift.call_args.args[0]

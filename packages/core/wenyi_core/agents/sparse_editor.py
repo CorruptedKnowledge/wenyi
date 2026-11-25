@@ -20,7 +20,6 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from ..ingest.segmenter import verse_block_indices
 from ..llm.json_parser import JsonParseError
 from ..llm.preflight import fit_prompt_to_context_window
 from ..llm.retrying import TruncatedResponseError, is_resumable_provider_interrupt
@@ -78,10 +77,25 @@ class SparseEditResult:
     failed: bool = False
 
 
+# Unspaced scripts have no word boundaries, so each character counts as one token; otherwise a
+# whole Chinese clause would be a single "word" and any edit to it would look like a rewrite.
+_UNSPACED_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]")
+
+
+def _content_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for word in _WORD_RE.findall(text):
+        if _UNSPACED_CHAR_RE.search(word):
+            tokens.extend(word)
+        else:
+            tokens.append(word.casefold())
+    return tokens
+
+
 def _token_overlap_ratio(a: str, b: str) -> float:
     """Return Jaccard overlap of content tokens (used to guard against gratuitous style churn)."""
-    ta = {w.casefold() for w in _WORD_RE.findall(a)}
-    tb = {w.casefold() for w in _WORD_RE.findall(b)}
+    ta = set(_content_tokens(a))
+    tb = set(_content_tokens(b))
     if not ta or not tb:
         return 1.0
     return len(ta & tb) / max(len(ta), len(tb))
@@ -92,7 +106,7 @@ def _is_gratuitous_style_churn(draft: str, candidate: str, reason: str) -> bool:
     low_reason = reason.casefold()
     if any(tok in low_reason for tok in _HEAVY_REWRITE_REASON_TOKENS):
         return False
-    draft_words = _WORD_RE.findall(draft)
+    draft_words = _content_tokens(draft)
     if len(draft_words) < 20:
         return False
     # If the model changed >65% of words for a purely stylistic/unspecified tweak, keep the draft.
@@ -196,18 +210,8 @@ class SparseSemanticEditor(Agent):
         paired_block = "\n\n".join(pairs_lines)
         next_ref = prompts.render_source_reference(next_source)
 
+        # Unlineated verse already arrives as a pre-screen alert from ``assess_batch_risk``.
         alert_blocks: list[str] = []
-        verse_indices = verse_block_indices(src_list)
-        unlineated_verse = [
-            idx
-            for idx, (_src, tgt) in enumerate(zip(src_list, draft_list))
-            if idx in verse_indices and tgt.strip() and "\n" not in tgt
-        ]
-        if unlineated_verse:
-            alert_blocks.append(
-                f"[Verse formatting alert] Paragraphs {unlineated_verse} are verse lines "
-                "drafted without line breaks. Emit patches splitting each verse line/couplet with '\\n'."
-            )
         risk_alert_text = risk.format_prompt_alerts(max_items=6)
         if risk_alert_text:
             alert_blocks.append(risk_alert_text)
