@@ -320,19 +320,29 @@ def test_zh_numeral_glossary_name_ignores_chapter_headings_and_counts():
     sources = [
         "第七十一章 我要做英雄",
         "第十一章 第一晚",
+        "第十一回 英雄出世",
+        "十一回 英雄出世",
         "十一月十一日十一点，他买回十一个苹果。",
+        "十一人齐声答道，两人大战十一回合，他去了十一回才找到。十一回过去了，他仍未成功。",
         "十一笑了笑，推门走了进来。",
+        "十一回头望去。",
+        "十一回到屋内。",
     ]
     drafts = [
         "Chapter 71: I Want to Be a Hero",
         "Chapter 11: The First Night",
+        "Chapter 11: A Hero Appears",
+        "Episode 11: A Hero Appears",
         "At eleven o'clock on November 11, he bought eleven apples.",
+        "All 11 people answered in unison; the two fought 11 rounds, he went 11 times before finding it, and 11 times passed without success.",
         "Shi Yi smiled and pushed the door open.",
+        "Shi Yi looked back.",
+        "Shi Yi returned inside.",
     ]
     report = assess_batch_risk(
         sources, drafts, source_lang="zh", target_lang="en", glossary_terms=terms
     )
-    assert _codes(report) == {(3, "glossary_miss")}
+    assert _codes(report) == {(6, "glossary_miss"), (7, "glossary_miss"), (8, "glossary_miss")}
 
 
 def test_modern_prose_produces_zero_structural_false_positives():

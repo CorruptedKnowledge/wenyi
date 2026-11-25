@@ -53,7 +53,12 @@ _JA_TANKA_QUOTE_RE = re.compile(
 _ZH_NUMERAL_ONLY_RE = re.compile(r"^[零〇一二三四五六七八九十百千万萬亿億两兩]+$")
 _ZH_NUMERAL_LEFT_BOUNDARY = frozenset("第零〇一二三四五六七八九十百千万萬亿億两兩")
 _ZH_NUMERAL_RIGHT_BOUNDARY = frozenset(
-    "零〇一二三四五六七八九十百千万萬亿億章回节節卷集篇幕年月日天时時分秒点點岁歲个個名位件条條次遍倍成斤两兩米尺丈里元块塊钱錢"
+    "零〇一二三四五六七八九十百千万萬亿億章节節卷集篇幕年月日天时時分秒点點岁歲个個名位人件条條次遍倍成斤两兩米尺丈里元块塊钱錢"
+)
+# Common characters forming return/reply verb compounds after 回 (e.g. 十一回头 / 十一回到),
+# distinguishing character-name subjects from counts like 十一回才找到 or 十一回合.
+_ZH_HUI_VERB_NEXT = frozenset(
+    "头頭到来來去答回应應复復覆身望忆憶想首眸道话話礼禮敬绝絕看转轉返归歸神"
 )
 
 
@@ -226,7 +231,17 @@ def _glossary_source_matches(term_source: str, norm_text: str, *, src_base: str)
             return False
         left_ok = pos == 0 or norm_text[pos - 1] not in _ZH_NUMERAL_LEFT_BOUNDARY
         end = pos + len(key)
-        right_ok = end >= len(norm_text) or norm_text[end] not in _ZH_NUMERAL_RIGHT_BOUNDARY
+        if end >= len(norm_text):
+            right_ok = True
+        else:
+            next_ch = norm_text[end]
+            if next_ch in _ZH_NUMERAL_RIGHT_BOUNDARY:
+                right_ok = False
+            elif next_ch == "回":
+                after_hui = norm_text[end + 1] if end + 1 < len(norm_text) else ""
+                right_ok = after_hui in _ZH_HUI_VERB_NEXT
+            else:
+                right_ok = True
         if left_ok and right_ok:
             return True
         start = pos + 1
