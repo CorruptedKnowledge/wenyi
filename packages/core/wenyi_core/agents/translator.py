@@ -496,6 +496,10 @@ class Translator(Agent):
             if isinstance(parsed, dict) and "translations" in parsed:
                 items = self._extract_batch_items(parsed, 1)
                 text = items[0].strip()
+            elif parsed is None and '"translations"' in text:
+                # A broken JSON envelope can carry reasoning around the translation; never
+                # save it as plain prose.
+                raise AlignmentError("The plain-text translation fallback returned broken JSON")
         if not text:
             raise _EmptyTranslationError("The model returned an empty or non-string translation")
         return text

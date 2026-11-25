@@ -193,6 +193,34 @@ class TestTranslatorAlignment(unittest.TestCase):
         self.assertEqual(translator.translate_batch(["あ"]), ["译文"])
         self.assertEqual(modes, [True, False])
 
+    def test_plain_text_fallback_rejects_broken_json_envelope(self):
+        def handler(messages, tier, json_mode):
+            del messages, tier, json_mode
+            return '{"translations":["译文</translations>}Wait, JSON only.{'
+
+        translator = Translator(FakeClient(handler=handler), self._config())
+
+        with pytest.raises(Exception, match="failed at paragraph 0"):
+            translator.translate_batch(["あ"])
+
+    def test_unsafe_repair_in_empty_follow_up_uses_plain_text_mode(self):
+        replies = [
+            json.dumps({"translations": [""]}),
+            '{"translations":["译文</translations>}Wait, JSON only.{',
+            "译文",
+        ]
+        modes: list[bool] = []
+
+        def handler(messages, tier, json_mode):
+            del messages, tier
+            modes.append(json_mode)
+            return replies.pop(0)
+
+        translator = Translator(FakeClient(handler=handler), self._config())
+
+        self.assertEqual(translator.translate_batch(["あ"]), ["译文"])
+        self.assertEqual(modes, [True, True, False])
+
     def test_boundary_only_repair_is_still_accepted(self):
         client = FakeClient(
             handler=lambda messages, tier, json_mode: '```json\n{"translations":["译"]}\n```'

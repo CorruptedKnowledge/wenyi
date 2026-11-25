@@ -1906,8 +1906,8 @@ class TestTitleTranslation(unittest.TestCase):
                 with (
                     patch.object(
                         client,
-                        "complete_json",
-                        return_value={"titles": []},
+                        "complete",
+                        return_value='{"titles": []}',
                     ),
                     self.assertRaisesRegex(RuntimeError, "invalid number"),
                 ):
@@ -2547,9 +2547,15 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
 
     def test_epub_template_export_localizes_creator_nav_heading_and_package_lang(self):
         """Author, nav-document heading and package language follow the target language."""
+        for metadata_lang, translate_title in (("", True), ("ja", True), ("", False)):
+            with self.subTest(metadata_lang=metadata_lang, translate_title=translate_title):
+                self._check_localized_metadata_export(metadata_lang, translate_title)
+
+    def _check_localized_metadata_export(self, metadata_lang: str, translate_title: bool) -> None:
         from wenyi_core.assemble.writer import assemble
         from wenyi_core.ingest.epub_reader import read_epub
 
+        metadata_attr = f' xml:lang="{metadata_lang}"' if metadata_lang else ""
         with tempfile.TemporaryDirectory() as tmp:
             src_epub = os.path.join(tmp, "book.epub")
             out_epub = os.path.join(tmp, "book.en.epub")
@@ -2567,7 +2573,7 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                     '<?xml version="1.0" encoding="utf-8"?>'
                     '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
                     'unique-identifier="id" xml:lang="zh-CN">'
-                    '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                    f'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"{metadata_attr}>'
                     '<dc:identifier id="id">urn:uuid:1</dc:identifier>'
                     "<dc:title>特拉福买家俱乐部</dc:title><dc:creator>夕山白石</dc:creator>"
                     "<dc:publisher>某出版社</dc:publisher><dc:language>zh</dc:language>"
@@ -2582,7 +2588,8 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                     '<?xml version="1.0" encoding="utf-8"?>'
                     '<html xmlns="http://www.w3.org/1999/xhtml" '
                     'xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head>'
-                    '<body><nav epub:type="toc"><h1>目录</h1><ol>'
+                    '<body><nav epub:type="toc"><div><h1 class="toc" xml:lang="zh">'
+                    '<a id="start"></a>目录</h1></div><ol>'
                     '<li><a href="ch1.xhtml">第一章</a></li></ol></nav></body></html>',
                 )
                 zf.writestr(
@@ -2598,7 +2605,8 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
             store = FileStorage(os.path.join(tmp, "state"))
             store.init_from_document(doc)
             manifest = store.load_manifest()
-            manifest["title_translated"] = "The Trafford Buyers Club"
+            if translate_title:
+                manifest["meta"]["book_title_translated"] = "The Trafford Buyers Club"
             manifest["meta"]["epub_creators_translated"] = ["Xishan Baishi"]
             manifest["meta"]["epub_nav_titles_translated"] = ["Contents"]
             manifest["chapters"][0]["title_translated"] = "Chapter 1"
@@ -2619,6 +2627,14 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                 opf = BeautifulSoup(zf.read("OEBPS/content.opf"), "xml")
                 nav = BeautifulSoup(zf.read("OEBPS/nav.xhtml"), "html.parser")
                 ch1 = BeautifulSoup(zf.read("OEBPS/ch1.xhtml"), "html.parser")
+            title = opf.find("dc:title")
+            assert isinstance(title, Tag)
+            if translate_title:
+                self.assertEqual(title.get_text(), "The Trafford Buyers Club")
+            else:
+                # The suffixed fallback still holds source text, so it keeps the source tag.
+                self.assertEqual(title.get_text(), "特拉福买家俱乐部-wenyi-en")
+                self.assertEqual(title.get("xml:lang"), "zh-CN")
             package = opf.find("package")
             assert isinstance(package, Tag)
             self.assertEqual(package.get("xml:lang"), "en")
@@ -2629,12 +2645,17 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
             publisher = opf.find("dc:publisher")
             assert isinstance(publisher, Tag)
             self.assertEqual(
-                (publisher.get_text(), publisher.get("xml:lang")), ("某出版社", "zh-CN")
+                (publisher.get_text(), publisher.get("xml:lang")),
+                ("某出版社", None if metadata_lang else "zh-CN"),
             )
             self.assertIsNone(opf.find("dc:identifier").get("xml:lang"))
             self.assertEqual(nav.find("title").get_text(), "Contents")
-            self.assertEqual(nav.find("h1").get_text(), "Contents")
-            self.assertEqual(nav.find("a").get_text(), "Chapter 1")
+            heading = nav.find("h1")
+            assert isinstance(heading, Tag)
+            self.assertEqual(heading.get_text(), "Contents")
+            self.assertEqual(heading.get("xml:lang"), "en")
+            self.assertIsNotNone(heading.find("a", id="start"))
+            self.assertEqual(nav.find("ol").find("a").get_text(), "Chapter 1")
             paragraphs = ch1.find_all("p")
             self.assertEqual(str(paragraphs[0]), "<p>Body text.</p>")
             self.assertEqual(len(paragraphs[1].find_all("br")), 1)

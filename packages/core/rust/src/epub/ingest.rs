@@ -277,12 +277,16 @@ pub fn nav_headings(dom: &Dom) -> Vec<Id> {
         .into_iter()
         .collect();
     for nav in toc_navs(dom) {
-        nodes.extend(
-            dom.children(nav)
-                .iter()
-                .copied()
-                .filter(|&n| matches!(dom.name(n), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")),
-        );
+        // Headings may sit in a wrapper, but those inside the entry list are entry labels.
+        nodes.extend(dom.tags(nav).filter(|&n| {
+            matches!(dom.name(n), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+                && !dom.parents(n).take_while(|&a| a != nav).any(|a| {
+                    matches!(
+                        dom.name(a),
+                        "ol" | "ul" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                    )
+                })
+        }));
     }
     nodes
 }
