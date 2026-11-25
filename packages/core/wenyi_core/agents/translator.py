@@ -25,10 +25,12 @@ from .note_tools import batch_note_tools
 
 _LOGGER = logging.getLogger(__name__)
 _LEGACY_GLOSSARY_PLACEHOLDER_RE = re.compile(r"\$(?:\{glossary\}|glossary\b)")
-# A reply shaped like a JSON object (a brace followed by a key, or empty) or string array.
-# Prose that merely opens with a bracket ("[System] …", "{name} said", "['Tis …") does not
-# match; single-quoted envelopes are caught by the key check below.
-_JSON_ATTEMPT_RE = re.compile(r'^\s*(?:\{\s*(?:"|\w+\s*:|\})|\[\s*")')
+# A reply shaped like a JSON object (a brace followed by a key, or empty), a string array, or a
+# whole single-quoted literal. Prose that merely opens with a bracket ("[System] …",
+# "{name} said", "['Tis the season.") does not match.
+_JSON_ATTEMPT_RE = re.compile(
+    r"""^\s*(?:\{\s*(?:"|\w+\s*:|\})|\[\s*"|[\[{]\s*'.*[\]}]\s*$)""", re.DOTALL
+)
 # The translations key as JSON-like output writes it: quoted, or unquoted right after an
 # opening brace. Prose such as "The translations: …" does not match.
 _ENVELOPE_KEY_RE = re.compile(r"""(?:(["'])translations\1|\{\s*translations)\s*:""")
@@ -66,6 +68,9 @@ def _plain_text_target(text: str, source: str) -> str:
         raise AlignmentError("The plain-text translation fallback returned a JSON wrapper")
     if _JSON_ATTEMPT_RE.match(body) and not _JSON_ATTEMPT_RE.match(source_body):
         raise AlignmentError("The plain-text translation fallback returned a JSON wrapper")
+    # A fence embedded in commentary ("Here is the translation: ```…```") is not a translation.
+    if not fenced and "```" in text and "```" not in source:
+        raise AlignmentError("The plain-text translation fallback returned commentary")
     return body if fenced and not source_fenced else text
 
 

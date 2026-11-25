@@ -210,6 +210,9 @@ class TestTranslatorAlignment(unittest.TestCase):
             "other object": '{"translation":"译文"}',
             "unquoted key": '{translations: ["译文"]} Wait, let me produce correct JSON.',
             "empty object": "{}",
+            "single-quoted list": "['译文']",
+            "single-quoted object": "{'translation': '译文'}",
+            "commentary with fence": 'Here is the translation:\n```json\n["译文"]\n```',
             "reasoning prefix": 'Wait, the output format requires JSON only {"translations":["译文"]}',
         }
         for label, reply in cases.items():
