@@ -1532,6 +1532,7 @@ class TranslationService:
                                             for s in b
                                         )
                                     ),
+                                    self._bible_variants or None,
                                 ),
                             )
                         if all(s.target is not None for s in text_segs):

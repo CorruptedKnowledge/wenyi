@@ -1970,3 +1970,37 @@ def test_serial_chapters_pass_book_bible_variants_to_batches(tmp_path: Path):
     orch.run(str(book))
     assert plans
     assert all(plan.variants_by_source == {"行者": ("Walker",)} for plan in plans)
+
+
+def test_parallel_resume_repolish_passes_book_bible_variants(tmp_path: Path):
+    book = tmp_path / "novel.txt"
+    book.write_text(_PARALLEL_BOOK, encoding="utf-8")
+    base = _parallel_handler([])
+
+    def drafting(messages, tier, json_mode):
+        if "senior bilingual editor" in messages[0]["content"]:
+            raise RuntimeError("editor down")
+        return base(messages, tier, json_mode)
+
+    cfg = _parallel_config(tmp_path, polish=True, polish_mode="sparse")
+    Orchestrator(cfg, client=FakeClient(handler=drafting)).run(str(book))
+
+    orch = Orchestrator(cfg, client=FakeClient(handler=base))
+    original = orch._translation._bible_seed.ensure_seeded
+
+    def seeded(store, **kwargs):
+        original(store, **kwargs)
+        return {"行者": ("Walker",)}
+
+    orch._translation._bible_seed.ensure_seeded = seeded
+    jobs: list = []
+    real_schedule = orch._translation._schedule_polish
+
+    def capture(store, job, *args, **kwargs):
+        jobs.append(job)
+        return real_schedule(store, job, *args, **kwargs)
+
+    orch._translation._schedule_polish = capture
+    orch.run(str(book))
+    assert jobs
+    assert all(job.variants_by_source == {"行者": ("Walker",)} for job in jobs)
