@@ -4,7 +4,7 @@
 - Multilingual Book Bible mining (Japanese katakana/honorifics/ruby, Latin connectors/corpus),
   index-key probe fallback, morpheme-family clustering, conventions
 - Wave-local & cross-chapter pre-rendered QuoteMemory
-- Post-normalize repairs (leaked escapes, observed cased-script name variants only)
+- Post-normalize repairs (leaked escapes only)
 - Cross-language pair sheets (ja->en, en->zh) & base-locale fallback (zh->en-US/en-GB)
 - Post-parallel ConsistencySweepService
 """
@@ -35,10 +35,7 @@ from wenyi_core.pipeline.translate.consistency_sweep import (
     ConsistencySweepService,
     detect_mid_frequency_drift,
 )
-from wenyi_core.pipeline.translate.post_normalize import (
-    normalize_minority_names,
-    repair_escaped_newlines,
-)
+from wenyi_core.pipeline.translate.post_normalize import repair_escaped_newlines
 from wenyi_core.pipeline.translate.quote_memory import QuoteMemory
 
 
@@ -224,45 +221,13 @@ def test_sparse_editor_voice_guard_rejects_gratuitous_style_rewrites():
     assert res.patched_indices == ()
 
 
-def test_post_normalize_keeps_punctuation_and_replaces_only_observed_cased_variants():
+def test_post_normalize_keeps_punctuation_and_repairs_only_leaked_escapes():
     # Quote style, dashes and spaced em dashes are the translation's own house style.
     for text in (
         "'I have been waiting for hours.'",
         "I knew it — you agree.\n—Chronicles of Eastern Wu",
     ):
         assert repair_escaped_newlines("原文。", text) == text
-
-    # Mixed spellings without observed evidence are left for the glossary prompt and Review.
-    terms = [GlossaryTerm(source="三藏", target="Sanzang", type="person")]
-    out, subs = normalize_minority_names(
-        [("三藏说道，三藏大喜。", "Sanzang spoke, and San Zang rejoiced.")],
-        terms,
-        target_lang="en",
-    )
-    assert out[0] == "Sanzang spoke, and San Zang rejoiced."
-    assert subs == []
-
-    # Shorter variant ("Gao") must never match inside existing canonical ("Old Gao" -> never "Old Old Gao").
-    gao_terms = [GlossaryTerm(source="高老", target="Old Gao", type="person")]
-    gao_out, gao_subs = normalize_minority_names(
-        [("高老笑道，高老点头。", "Old Gao smiled, and Gao nodded.")],
-        gao_terms,
-        variants_by_source={"高老": ("Gao",)},
-        target_lang="en",
-    )
-    assert gao_out[0] == "Old Gao smiled, and Old Gao nodded."
-    assert len(gao_subs) == 1
-
-    # Uncased targets have no word boundary to guard a replacement, so they are left alone.
-    zh_terms = [GlossaryTerm(source="Edmund Burke", target="埃德蒙·伯克", type="person")]
-    zh_out, zh_subs = normalize_minority_names(
-        [("Edmund Burke wrote.", "爱德蒙·伯克写道。")],
-        zh_terms,
-        variants_by_source={"Edmund Burke": ("爱德蒙·伯克",)},
-        target_lang="zh",
-    )
-    assert zh_out[0] == "爱德蒙·伯克写道。"
-    assert zh_subs == []
 
     # Chinese targets keep raw "--" (it may be a command-line flag) but repair leaked escapes.
     assert repair_escaped_newlines("Test", "他说这真是--奇事！") == "他说这真是--奇事！"
@@ -397,19 +362,11 @@ def test_pr30_review_regressions(tmp_path):
     rows = _cluster_candidate_rows(dup_cands)
     assert sum("青云青云" in r for r in rows) == 1
 
-    # 4. post_normalize: em-dash \n unescapes, OLD Gao stays intact.
+    # 4. post_normalize: em-dash \n unescapes.
     assert (
         repair_escaped_newlines("诗。", "A spring outing—\\nApricot blossoms.")
         == "A spring outing—\nApricot blossoms."
     )
-
-    norm_res, _ = normalize_minority_names(
-        [("高老", "OLD Gao spoke, and Gao nodded.")],
-        [GlossaryTerm(source="高老", target="Old Gao", type="person")],
-        variants_by_source={"高老": ("Gao",)},
-        target_lang="en",
-    )
-    assert norm_res[0] == "OLD Gao spoke, and Old Gao nodded."
 
     # 5. QuoteMemory: punctuation distinguishes We'll vs Well,, multi-quote doesn't cross-assign,
     #    and cross_chapter_spans order is deterministic.
@@ -466,12 +423,26 @@ def test_pr30_review_regressions(tmp_path):
     store.save_chapter(ch0)
     store.save_chapter(ch1)
     cfg = Config(source_lang="zh", target_lang="en", llm=LLMConfig(preset="fake"))
+    # The editor patches every paragraph it is shown, so only the protection keeps ch1 intact.
+    patches = [
+        {"index": i, "reason": "glossary_mismatch", "text": "Cast aside by the heartless."}
+        for i in range(2)
+    ]
     svc = ConsistencySweepService(
-        SparseSemanticEditor(FakeClient(lambda m, op, jm: json.dumps({"patches": []})), cfg),
+        SparseSemanticEditor(
+            FakeClient(lambda m, op, jm: json.dumps({"patches": patches})),
+            cfg,
+        ),
         source_lang="zh",
         target_lang="en",
     )
-    svc.run(store, chapter_indices=[0, 1], terms=[])
+    res_docx = svc.run(
+        store,
+        chapter_indices=[0, 1],
+        terms=[GlossaryTerm(source="无情", target="heartless", type="term")],
+    )
+    assert res_docx.glossary_misses_patched == 1
+    assert store.load_chapter(0).text_segments[0].target == "Cast aside by the heartless."
     assert store.load_chapter(1).text_segments[0].target == "Protected DOCX styled line."
 
 

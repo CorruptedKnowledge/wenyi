@@ -30,34 +30,36 @@ def _matcher(key: str) -> re.Pattern[str] | str:
 
 
 # Inflected targets decline names and terms ("Москва" -> "в Москве", "Лунный лес" ->
-# "в Лунном лесу"), so a target word counts as used when its stem appears with a short
-# ending shorter than the stem. Matching more loosely only keeps a mapping in prompts
-# longer; it never drops one.
+# "в Лунном лесу"), so a target word counts as used with a short ending. Words of six or
+# more letters may also change their last two letters; shorter words keep their full form,
+# so "court" never matches "could" and "force" never matches "for". A false hit only keeps
+# a mapping in prompts longer; it never drops one or changes text.
 _STEM_TRIM = 2
-_MIN_STEM_WORD = 5
-_MAX_ENDING = 4
+_MIN_STEM_WORD = 6
+_MAX_ENDING = 3
+
+
+def _word_pattern(word: str) -> str:
+    if not word[-1:].isalpha():
+        return re.escape(word)
+    if len(word) >= _MIN_STEM_WORD:
+        return re.escape(word[:-_STEM_TRIM]) + rf"\w{{1,{_MAX_ENDING}}}"
+    # Short words take an ending of at most half their length: "лес" -> "лесу", "Lu" never
+    # "Lushan", "king" -> "kings" but never "kingdom".
+    max_ending = min(_MAX_ENDING, len(word) // 2)
+    return re.escape(word) + (rf"\w{{0,{max_ending}}}" if max_ending else "")
 
 
 def _inflection_tolerant_matcher(key: str) -> re.Pattern[str] | str:
-    """Match each target word with an optional short ending in spaced scripts.
+    """Match each target word with a short inflectional ending in spaced scripts.
 
     Unspaced scripts (CJK) keep the plain substring match, which already ignores endings.
     """
     if _source_pattern(key) is None:
         return key
-    parts = []
-    for word in key.split():
-        if len(word) >= _MIN_STEM_WORD and word[-1].isalpha():
-            stem = word[:-_STEM_TRIM]
-        else:
-            stem = word
-        # Short words take a proportionally short ending, so "Lu" never matches "Lushan".
-        max_ending = min(_MAX_ENDING, len(stem) - 1)
-        ending = rf"\w{{0,{max_ending}}}" if max_ending > 0 and stem[-1:].isalnum() else ""
-        parts.append(re.escape(stem) + ending)
     left = r"(?<!\w)" if key[:1].isalnum() else ""
     right = r"(?!\w)" if key[-1:].isalnum() else ""
-    return re.compile(left + r"\s+".join(parts) + right)
+    return re.compile(left + r"\s+".join(_word_pattern(w) for w in key.split()) + right)
 
 
 def _found(matcher: re.Pattern[str] | str, text: str) -> bool:

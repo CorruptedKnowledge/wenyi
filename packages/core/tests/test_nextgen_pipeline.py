@@ -14,6 +14,7 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
 from wenyi_core.agents.book_bible import BookBibleAgent, mine_bible_candidates
 from wenyi_core.agents.sparse_editor import SparseSemanticEditor
 from wenyi_core.config import Config
@@ -1727,13 +1728,11 @@ def test_chapter_hygiene_preserves_offset_bound_annotation_and_docx_style_segmen
     ann_head = Segment(
         index=0,
         source="行者道：「第一段。",
-        target='Walker paused -- "First part.',
+        target="Walker paused.\\nFirst part.",
         meta={
             "annotations": {
                 "items": [{"id": "a1", "mode": "point", "source_start": 0, "source_end": 2}],
-                "target_digest": target_digest(
-                    'Walker paused -- "First part.Continuation -- here.'
-                ),
+                "target_digest": target_digest("Walker paused.\\nFirst part.Continuation.\\nhere."),
                 "placements": [
                     {"id": "a1", "status": "aligned", "target_start": 0, "target_end": 6}
                 ],
@@ -1743,17 +1742,17 @@ def test_chapter_hygiene_preserves_offset_bound_annotation_and_docx_style_segmen
     ann_cont = Segment(
         index=1,
         source="續段。",
-        target="Continuation -- here.",
+        target="Continuation.\\nhere.",
         cont=True,
     )
     docx_seg = Segment(
         index=2,
         source="三藏笑道。",
-        target='Sanzang said: "Wait -- now."',
+        target="Sanzang waited.\\nNow.",
         meta={
             "docx_styles": {
                 "items": [{"id": "s1", "mode": "range", "source_start": 0, "source_end": 2}],
-                "target_digest": target_digest('Sanzang said: "Wait -- now."'),
+                "target_digest": target_digest("Sanzang waited.\\nNow."),
                 "placements": [
                     {"id": "s1", "status": "aligned", "target_start": 0, "target_end": 7}
                 ],
@@ -1763,24 +1762,18 @@ def test_chapter_hygiene_preserves_offset_bound_annotation_and_docx_style_segmen
     plain_seg = Segment(
         index=3,
         source="行者又道。",
-        target='Walker said: "Wait -- now."',
+        target="Walker waited.\\nNow.",
     )
     chapter = Chapter(index=0, title="Ch1", segments=[ann_head, ann_cont, docx_seg, plain_seg])
-    terms = [GlossaryTerm(source="行者", target="Pilgrim", type="person")]
 
-    service._apply_chapter_hygiene(
-        store,
-        chapter,
-        terms=terms,
-        variants={"行者": ["Walker"]},
-    )
+    service._apply_chapter_hygiene(store, chapter)
 
     # Offset-bound annotation (head + cont) and docx_styles segments stay byte-identical.
-    assert ann_head.target == 'Walker paused -- "First part.'
-    assert ann_cont.target == "Continuation -- here."
-    assert docx_seg.target == 'Sanzang said: "Wait -- now."'
-    # Plain segment receives minority-name normalization; punctuation is left as drafted.
-    assert plain_seg.target == 'Pilgrim said: "Wait -- now."'
+    assert ann_head.target == "Walker paused.\\nFirst part."
+    assert ann_cont.target == "Continuation.\\nhere."
+    assert docx_seg.target == "Sanzang waited.\\nNow."
+    # The plain segment gets the leaked-escape repair.
+    assert plain_seg.target == "Walker waited.\nNow."
 
 
 def test_bible_candidates_tiebreak_deterministically_at_max_candidates():
@@ -1905,7 +1898,21 @@ def test_book_bible_keeps_adjudicated_gender_when_scenes_mix_pronouns():
     assert "do not spoil" not in by_source["黛玉"].note.lower()
 
 
-def test_chapter_hygiene_never_resolves_open_glossary_conflicts(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [
+        # Russian case ending: a probe can observe "Москву" next to canonical "Москва".
+        ("He went to Moscow.", "Он отправился в Москву."),
+        # English plural of a family name.
+        ("史密斯一家到了。", "The Smiths arrived."),
+        # A variant that is part of another name.
+        ("老高的女儿高翠兰。", "Old Gao's daughter, Gao Cuilan."),
+        # An open glossary conflict may be a different place.
+        ("白石在白石镇外。", "White Stone lies beyond White Rock Town."),
+    ],
+)
+def test_chapter_hygiene_never_rewrites_names(tmp_path: Path, source: str, target: str):
+    """Name consistency belongs to the glossary prompt and Review, not a regex pass."""
     from wenyi_core.models.document import Chapter, Segment
     from wenyi_core.pipeline.annotate.annotations import AnnotationService
     from wenyi_core.pipeline.run.runtime import PipelineRuntime
@@ -1916,15 +1923,15 @@ def test_chapter_hygiene_never_resolves_open_glossary_conflicts(tmp_path: Path):
     store = FileStorage(str(tmp_path / "run"), create=True)
     runtime = PipelineRuntime(cfg, client=FakeClient(handler=_parallel_handler([])))
     service = TranslationService(runtime, AnnotationService(runtime))
-    # The conflict is open because "White Rock" may be a different place, so hygiene must
-    # leave it to adjudication and Review instead of rewriting it to the stored target.
+    service._bible_variants = {
+        "Moscow": ("Москву",),
+        "史密斯": ("Smiths",),
+        "老高": ("Gao",),
+    }
     store.open_conflicts = lambda: [{"source": "白石", "proposed_target": "White Rock"}]
-    seg = Segment(
-        index=0, source="白石在白石镇外。", target="White Stone lies beyond White Rock Town."
-    )
+    seg = Segment(index=0, source=source, target=target)
     chapter = Chapter(index=0, title="Ch1", segments=[seg])
-    terms = [GlossaryTerm(source="白石", target="White Stone", type="place")]
 
-    service._apply_chapter_hygiene(store, chapter, terms=terms)
+    service._apply_chapter_hygiene(store, chapter)
 
-    assert seg.target == "White Stone lies beyond White Rock Town."
+    assert seg.target == target

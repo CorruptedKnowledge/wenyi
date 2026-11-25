@@ -1,6 +1,6 @@
 """Unit tests for Phase 1 non-glossary craft improvements:
 embedded-domain watermarks, verse-aware batching, zh->en register sheet,
-repeated-quotation memory, leaked-escape repair, and minority-name normalization.
+repeated-quotation memory, and leaked-escape repair.
 """
 
 from __future__ import annotations
@@ -10,11 +10,7 @@ from wenyi_core.i18n.prompts import render
 from wenyi_core.ingest.boilerplate import match_boilerplate
 from wenyi_core.ingest.segmenter import _is_verse_segment, batch_segments
 from wenyi_core.models.document import Segment
-from wenyi_core.models.glossary import GlossaryTerm
-from wenyi_core.pipeline.translate.post_normalize import (
-    normalize_minority_names,
-    repair_escaped_newlines,
-)
+from wenyi_core.pipeline.translate.post_normalize import repair_escaped_newlines
 from wenyi_core.pipeline.translate.quote_memory import QuoteMemory
 
 
@@ -115,49 +111,6 @@ def test_quote_memory_detects_repeated_verse_and_formats_callback_reference():
     assert "I feel no shame" in block
 
 
-def test_minority_name_normalizer_fixes_observed_variants_only():
-    terms = [
-        GlossaryTerm(source="行者", target="Pilgrim", type="person"),
-        GlossaryTerm(source="三藏", target="Sanzang", type="person"),
-        GlossaryTerm(source="孤", target="I", type="appellation"),
-    ]
-    pairs = [
-        ("行者笑道：「走吧。」", 'Xingzhe laughed, "Let us go."'),
-        ("行者點頭。", "Walker nodded."),
-        ("行者早已有備。", "Pilgrim was already prepared."),
-        ("三藏合掌道謝。", "San Zang pressed his palms together in thanks."),
-        ("無關段落。", "Xingzhe is not in the source here."),
-        ("孤可以宴飲。", "lone could feast."),
-    ]
-    normalized, subs = normalize_minority_names(
-        pairs,
-        terms,
-        variants_by_source={"行者": ["Xingzhe", "Walker"]},
-        target_lang="en",
-    )
-    assert normalized[0] == 'Pilgrim laughed, "Let us go."'
-    assert normalized[1] == "Pilgrim nodded."
-    assert normalized[2] == "Pilgrim was already prepared."
-    # Split spellings are never guessed: only observed variants are replaced.
-    assert normalized[3] == "San Zang pressed his palms together in thanks."
-    # Never touches paragraphs where source does not contain the term.
-    assert normalized[4] == "Xingzhe is not in the source here."
-    # Never touches generic single-word pronoun entries.
-    assert normalized[5] == "lone could feast."
-    assert len(subs) == 2
-
-
-def test_name_normalizer_never_rewrites_another_entitys_name():
-    terms = [
-        GlossaryTerm(source="三藏", target="Sanzang", type="person"),
-        GlossaryTerm(source="散臧", target="San Zang", type="person"),
-    ]
-    pairs = [("三藏遇见散臧。", "San Zang bowed to the monk.")]
-    normalized, subs = normalize_minority_names(pairs, terms)
-    assert normalized == ["San Zang bowed to the monk."]
-    assert subs == []
-
-
 def test_quote_memory_keeps_meaning_bearing_punctuation_in_keys():
     memory = QuoteMemory.from_chapters(
         [(0, ["We'll go to the old house.", "Well, go to the old house."])]
@@ -178,46 +131,6 @@ def test_quote_memory_skips_inner_quotes_without_a_target_quote():
         "He said, 'The empire long divided must unite,' then fell silent.",
     )
     assert memory.references_for_batch([f"她也说{quote}，众人都笑了起来。"]) == []
-
-
-def test_minority_name_normalizer_replaces_all_observed_variants_in_one_paragraph():
-    terms = [
-        GlossaryTerm(source="行者", target="Pilgrim", type="person"),
-        GlossaryTerm(source="三藏", target="Sanzang", type="person"),
-        GlossaryTerm(source="孫悟空", target="Sun Wukong", type="person"),
-    ]
-    pairs = [
-        ("行者笑著對行者點頭。", "Xingzhe laughed, and Walker nodded."),
-        ("三藏與三藏同席。", "Tripitaka spoke to San Zang."),
-        ("孫悟空大笑，孫悟空躍起。", "Monkey King laughed, and Wukong leaped."),
-    ]
-    normalized, subs = normalize_minority_names(
-        pairs,
-        terms,
-        variants_by_source={
-            "行者": ["Xingzhe", "Walker"],
-            "三藏": ["Tripitaka"],
-            "孫悟空": ["Monkey King", "Wukong"],
-        },
-        target_lang="en",
-    )
-    assert normalized[0] == "Pilgrim laughed, and Pilgrim nodded."
-    assert normalized[1] == "Sanzang spoke to San Zang."
-    # Replacing a longer variant must never re-match a shorter variant inside the canonical name.
-    assert normalized[2] == "Sun Wukong laughed, and Sun Wukong leaped."
-    assert len(subs) == 5
-
-
-def test_post_normalize_preserves_wenyi_protected_object_markers():
-    terms = [GlossaryTerm(source="行者", target="Pilgrim", type="person")]
-    normalized, subs = normalize_minority_names(
-        [("行者來了。", "See 〘object:img.Walker〙 while Walker smiles.")],
-        terms,
-        variants_by_source={"行者": ["Walker"]},
-        target_lang="en",
-    )
-    assert normalized == ["See 〘object:img.Walker〙 while Pilgrim smiles."]
-    assert len(subs) == 1
 
 
 def test_escaped_newline_repair_keeps_code_latex_and_paths():
@@ -266,6 +179,12 @@ def test_escaped_newline_repair_fixes_leaked_breaks_in_any_script():
     )
 
 
+def test_escaped_newline_repair_keeps_spaced_escape_notation_in_prose():
+    # A technical book can name the escape in words in the source and write it in the target.
+    target = "Символ новой строки обозначают как \\n."
+    assert repair_escaped_newlines("改行文字を表す記号。", target) == target
+
+
 def test_escaped_newline_repair_keeps_literal_escapes_the_source_also_has():
     # A programming book explaining escape sequences: the literal \n is content, not a leak.
     source = r"Write \n to start a new line."
@@ -288,31 +207,3 @@ def test_escaped_newline_repair_keeps_literal_escapes_the_source_also_has():
 def test_post_translation_hygiene_never_rewrites_punctuation_or_layout(target: str):
     """House styles differ by language and genre; hygiene must leave them as drafted."""
     assert repair_escaped_newlines("原文。", target) == target
-    normalized, subs = normalize_minority_names(
-        [("原文。", target)],
-        [GlossaryTerm(source="原文", target="Original", type="term")],
-        variants_by_source={},
-        target_lang="en",
-    )
-    assert normalized == [target]
-    assert subs == []
-
-
-def test_name_normalizer_skips_uncased_targets_where_variants_nest_inside_other_names():
-    terms = [GlossaryTerm(source="Alexander", target="亚历山大", type="person")]
-    pairs = [("Alexander introduced Alexandra.", "亚历山大介绍了亚历山德拉。")]
-    normalized, subs = normalize_minority_names(
-        pairs, terms, variants_by_source={"Alexander": ["亚历山德"]}, target_lang="zh"
-    )
-    assert normalized == ["亚历山大介绍了亚历山德拉。"]
-    assert subs == []
-
-
-def test_name_normalizer_never_guesses_split_spellings_of_ordinary_words():
-    terms = [GlossaryTerm(source="诺斯盖特", target="Northgate", type="place")]
-    pairs = [
-        ("他穿过北门，进入诺斯盖特。", "He passed through the North Gate and entered Northgate.")
-    ]
-    normalized, subs = normalize_minority_names(pairs, terms, target_lang="en")
-    assert normalized == ["He passed through the North Gate and entered Northgate."]
-    assert subs == []
