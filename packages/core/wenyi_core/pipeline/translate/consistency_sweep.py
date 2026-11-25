@@ -32,7 +32,6 @@ from ...storage.protocol import Storage
 
 _LOGGER = logging.getLogger(__name__)
 _EN_CONTENT_WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z'-]{3,}\b")
-_ANCHOR_WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z'-]+\b")
 _EN_STOPWORDS = frozenset(
     {
         "that",
@@ -336,12 +335,13 @@ def detect_mid_frequency_drift(
         return []
 
     watched = [src for src in watch_map if src.strip()]
-    # Anchor words from the probe renderings, including short titles such as "Sir" or "Don".
+    # Anchor words are the content words of the probe renderings, the same kind of word a split
+    # can be made of. A title whose renderings have none (only "Sir"/"Don") cannot be checked.
     anchors_by_source = {
         src: {
             _norm_en_word(word)
             for rendering in watch_map[src]
-            for word in _ANCHOR_WORD_RE.findall(rendering or "")
+            for word in _EN_CONTENT_WORD_RE.findall(rendering or "")
             if word.casefold() not in _EN_STOPWORDS
         }
         for src in watched
@@ -352,9 +352,11 @@ def detect_mid_frequency_drift(
 
     def anchored(gram: str, *words: str) -> bool:
         # Without probe renderings (callers that only name the titles) every split counts.
+        # Otherwise every word of the split must be one the probes produced, so a rendering
+        # is never paired with scenery that happens to differ between chapters.
         if not any(watch_map[gram]):
             return True
-        return any(is_anchor(gram, word) for word in words)
+        return all(is_anchor(gram, word) for word in words)
 
     term_paras: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
     term_chapters: dict[str, set[int]] = defaultdict(set)
@@ -558,12 +560,19 @@ class ConsistencySweepService:
         protected_by_ch = {ch.index: _protected_segment_ids(ch) for ch in chapters}
         modified_chapters: set[int] = set()
 
+        # Entries under dispute (an open conflict) are the user's to resolve; neither pass
+        # rewrites text toward either side.
+        disputed = {
+            normalize_match_text(str(c.get("source") or "")).strip() for c in store.open_conflicts()
+        }
+
         # 1. Book-wide glossary miss sweep (surgical sparse patches for missed canonical terms).
         generic_words = glossary_generic_target_words(self._tgt)
         entity_terms = [
             t
             for t in terms
             if t.status == STATUS_OK
+            and normalize_match_text(t.source).strip() not in disputed
             and t.type in {"person", "place", "organization", "term"}
             and len(t.source.strip()) >= 2
             and len(t.target.strip()) >= 2
@@ -643,13 +652,6 @@ class ConsistencySweepService:
         glossary_by_source = {
             normalize_match_text(t.source).strip(): t for t in terms if t.type != TYPE_NAVIGATION
         }
-        try:
-            disputed = {
-                normalize_match_text(str(c.get("source") or "")).strip()
-                for c in store.open_conflicts()
-            }
-        except Exception:  # noqa: BLE001 - storage without conflict tracking
-            disputed = set()
         to_adjudicate: list[DriftCluster] = []
         for cluster in drift_clusters:
             key = normalize_match_text(cluster.source).strip()

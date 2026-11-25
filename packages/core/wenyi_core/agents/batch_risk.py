@@ -81,6 +81,8 @@ class BatchRiskReport:
             ]
             + reserved
         )
+        if not ranked:
+            return ""
         ranked.sort(key=lambda a: a.index)
         lines = ["[Pre-screen alerts — verify these specific paragraphs carefully before deciding]"]
         for alert in ranked:

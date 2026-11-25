@@ -171,6 +171,9 @@ def test_consistency_sweep_accepts_term_plurals_but_flags_person_name_drift():
         def save_chapter(self, ch: Chapter) -> None:
             chapters[ch.index] = ch
 
+        def open_conflicts(self) -> list[dict]:
+            return []
+
     sweeper = ConsistencySweepService(_RecordingEditor(), source_lang="zh", target_lang="en")
     sweeper.run(_FakeStore(), chapter_indices=[0, 1], terms=terms)
     assert len(seen_calls) == 1
@@ -735,13 +738,46 @@ def test_consistency_sweep_leaves_disputed_titles_to_the_user(tmp_path):
     editor.edit_batch.assert_not_called()
 
 
+def test_consistency_sweep_skips_titles_whose_glossary_entry_is_not_active(tmp_path):
+    from wenyi_core.models.glossary import STATUS_CONFLICT
+
+    editor = _sweep_title_split(
+        tmp_path,
+        terms=[GlossaryTerm(source="国主", target="the king", type="term", status=STATUS_CONFLICT)],
+    )
+    editor.adjudicate_drift.assert_not_called()
+    editor.edit_batch.assert_not_called()
+
+
+def test_glossary_miss_pass_leaves_disputed_terms_alone(tmp_path):
+    from unittest.mock import Mock
+
+    from wenyi_core.pipeline.translate.consistency_sweep import ConsistencySweepService
+    from wenyi_core.storage.file import FileStorage
+
+    store = FileStorage(str(tmp_path / "state"), create=True)
+    rows0 = [("El obispo rezó.", "The bishop prayed.")] * 2
+    rows1 = [("El obispo rezó.", "The high priest prayed.")] * 2
+    for chapter in _chapters([rows0, rows1]):
+        store.save_chapter(chapter)
+    store.open_conflicts = lambda: [{"source": "obispo", "proposed_target": "high priest"}]
+    editor = Mock()
+    svc = ConsistencySweepService(editor, source_lang="es", target_lang="en")
+    svc.run(
+        store,
+        chapter_indices=[0, 1],
+        terms=[GlossaryTerm(source="obispo", target="bishop", type="person")],
+    )
+    editor.edit_batch.assert_not_called()
+
+
 def test_consistency_sweep_adjudicates_unglossed_watched_titles(tmp_path):
     editor = _sweep_title_split(tmp_path, terms=[])
     clusters = editor.adjudicate_drift.call_args.args[0]
     assert [c["source"] for c in clusters] == ["国主"]
 
 
-def test_drift_anchors_short_renderings_and_prefers_probe_words():
+def test_drift_needs_both_split_words_from_the_probe_renderings():
     scenery0 = [("Don Pedro entra al castillo.", "Don Pedro entered the castle.")] * 3
     scenery1 = [("Don Pedro entra al palacio.", "Don Pedro entered the palace.")] * 3
     assert (
@@ -750,6 +786,32 @@ def test_drift_anchors_short_renderings_and_prefers_probe_words():
             source_lang="es",
             target_lang="en",
             extra_watch_sources={"Don": ("Don", "Sir")},
+        )
+        == []
+    )
+    # Function words in a rendering never anchor ("Her Majesty" does not make "hers" a title).
+    majesty0 = [("陛下说那是她的。", "Her Majesty said it was hers.")] * 3
+    majesty1 = [("陛下进了宫。", "Her Majesty entered the palace.")] * 3
+    assert (
+        detect_mid_frequency_drift(
+            _chapters([majesty0, majesty1]),
+            source_lang="zh",
+            target_lang="en",
+            extra_watch_sources={"陛下": ("Her Majesty", "Her Highness")},
+        )
+        == []
+    )
+    # One probe word paired with scenery from the other chapter is not a split.
+    one0 = [("Le roi entra au jardin.", "The king entered the garden.")] * 2 + [
+        ("Le roi entra au jardin.", "He entered the garden.")
+    ]
+    one1 = [("Le roi entra au château.", "He entered the castle.")] * 3
+    assert (
+        detect_mid_frequency_drift(
+            _chapters([one0, one1]),
+            source_lang="fr",
+            target_lang="en",
+            extra_watch_sources={"roi": ("the king", "the monarch")},
         )
         == []
     )
@@ -775,6 +837,7 @@ def test_verse_alert_keeps_its_slot_in_a_full_alert_budget():
     report = assess_batch_risk(sources, drafts, source_lang="zh", target_lang="en")
     assert sum(a.code == "script_residue" for a in report.alerts) == 6
     assert "unlineated_verse" in report.format_prompt_alerts(max_items=6)
+    assert report.format_prompt_alerts(max_items=0) == ""
 
 
 def test_style_guard_rejects_large_chinese_deletions():
