@@ -20,6 +20,7 @@ from ...ingest.epub_reader import peek_epub_title
 from ...ingest.segmenter import load_document
 from ...ingest.tokens import count_tokens
 from ...llm.errors import ProviderFailure, describe_provider_failure
+from ...llm.routing import inference_snapshot
 from ...models.document import Document
 from ...storage.protocol import Storage
 from ...storage.run_store import source_sha256, translation_run_dir
@@ -285,7 +286,7 @@ class PreparationService:
             "sample": sample,
             "digests": digests,
             "policy": policy.task_fingerprint("analyzer"),
-            "routing": self._runtime.config.llm.model_dump(mode="json"),
+            "routing": inference_snapshot(self._runtime.config.llm, ("analysis.style",)),
         }
         # Only bind digest_budget when the raw digest block exceeds it, preserving existing
         # cache keys for small books whose digests render byte-for-byte identically.

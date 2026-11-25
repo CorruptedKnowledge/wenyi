@@ -247,6 +247,64 @@ def test_required_prescan_failure_prevents_style_and_manifest_commit(tmp_path):
     assert all(segment.target is None for segment in store.load_chapter(0).segments)
 
 
+def test_style_analysis_cache_scopes_to_analysis_style_route(tmp_path):
+    from wenyi_core.ingest.segmenter import load_document
+
+    source, config, store = _preparation_inputs(tmp_path)
+    ref = "deepseek/deepseek-flash"
+    base_routes = {
+        "analysis.style": {"model": ref, "thinking": "low"},
+        "synopsis.chapter": {"model": ref, "thinking": "off"},
+        "synopsis.book": {"model": ref, "thinking": "off"},
+        "translation.body": {"model": ref, "thinking": "off"},
+    }
+    config.llm = Config.from_dict({"llm": {"preset": "deepseek", "routes": base_routes}}).llm
+    first_client = FakeClient(handler=routing_handler)
+    orch1 = Orchestrator(config, client=first_client, storage=store)
+    parsed = load_document(str(source), "ja", "zh")
+    first = orch1._preparation._analyze_document(store, parsed, ["d0"], "src-sha")
+    assert first
+    assert [c["operation"] for c in first_client.calls] == ["analysis.style"]
+
+    # Changing an unrelated route (translation.body) reuses the cached style analysis.
+    config2 = Config.from_dict(
+        {
+            "language": {"source": "ja", "target": "zh"},
+            "llm": {
+                "preset": "deepseek",
+                "routes": {
+                    **base_routes,
+                    "translation.body": {"model": ref, "thinking": "max"},
+                },
+            },
+            "paths": {"state_dir": str(tmp_path / "state")},
+        }
+    )
+    second_client = FakeClient(handler=routing_handler)
+    orch2 = Orchestrator(config2, client=second_client, storage=store)
+    assert orch2._preparation._analyze_document(store, parsed, ["d0"], "src-sha") == first
+    assert second_client.calls == []
+
+    # Changing analysis.style invalidates the style-analysis cache.
+    config3 = Config.from_dict(
+        {
+            "language": {"source": "ja", "target": "zh"},
+            "llm": {
+                "preset": "deepseek",
+                "routes": {
+                    **base_routes,
+                    "analysis.style": {"model": ref, "thinking": "high"},
+                },
+            },
+            "paths": {"state_dir": str(tmp_path / "state")},
+        }
+    )
+    third_client = FakeClient(handler=routing_handler)
+    orch3 = Orchestrator(config3, client=third_client, storage=store)
+    assert orch3._preparation._analyze_document(store, parsed, ["d0"], "src-sha")
+    assert [c["operation"] for c in third_client.calls] == ["analysis.style"]
+
+
 class TestSampleText(unittest.TestCase):
     def _long_doc(self, d):
         from wenyi_core.ingest.segmenter import load_document
