@@ -24,14 +24,15 @@ from dataclasses import dataclass
 
 from ...agents.batch_risk import _is_generic, _target_contains_term
 from ...agents.sparse_editor import SparseSemanticEditor
-from ...glossary.store import STATUS_OK, source_matches_text
+from ...glossary.store import STATUS_OK, normalize_match_text, source_matches_text
 from ...i18n.languages import glossary_generic_target_words
 from ...models.document import Chapter, Segment
-from ...models.glossary import GlossaryTerm
+from ...models.glossary import TYPE_NAVIGATION, GlossaryTerm
 from ...storage.protocol import Storage
 
 _LOGGER = logging.getLogger(__name__)
 _EN_CONTENT_WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z'-]{3,}\b")
+_ANCHOR_WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z'-]+\b")
 _EN_STOPWORDS = frozenset(
     {
         "that",
@@ -335,21 +336,25 @@ def detect_mid_frequency_drift(
         return []
 
     watched = [src for src in watch_map if src.strip()]
+    # Anchor words from the probe renderings, including short titles such as "Sir" or "Don".
     anchors_by_source = {
         src: {
             _norm_en_word(word)
             for rendering in watch_map[src]
-            for word in _EN_CONTENT_WORD_RE.findall(rendering or "")
+            for word in _ANCHOR_WORD_RE.findall(rendering or "")
             if word.casefold() not in _EN_STOPWORDS
         }
         for src in watched
     }
 
+    def is_anchor(gram: str, word: str) -> bool:
+        return any(_same_en_lemma(word, anchor) for anchor in anchors_by_source.get(gram, ()))
+
     def anchored(gram: str, *words: str) -> bool:
-        anchors = anchors_by_source.get(gram)
-        if not anchors:
+        # Without probe renderings (callers that only name the titles) every split counts.
+        if not any(watch_map[gram]):
             return True
-        return any(_same_en_lemma(word, anchor) for word in words for anchor in anchors)
+        return any(is_anchor(gram, word) for word in words)
 
     term_paras: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
     term_chapters: dict[str, set[int]] = defaultdict(set)
@@ -426,6 +431,9 @@ def detect_mid_frequency_drift(
             ):
                 distinctive.append((word, cnt))
 
+        # Prefer words the probes produced, so a real king/monarch split outranks co-occurring
+        # scenery such as castle/palace.
+        distinctive.sort(key=lambda item: not is_anchor(gram, item[0]))
         if len(distinctive) >= 2 and anchored(gram, distinctive[0][0], distinctive[1][0]):
             # Check mutual exclusivity of top two distinctive target words (split rendering signal!).
             (w1, c1), (w2, c2) = distinctive[0], distinctive[1]
@@ -630,17 +638,41 @@ class ConsistencySweepService:
         )
         drift_patched = 0
         drift_decisions: dict[str, str] = {}
-        if drift_clusters:
-            drift_decisions = self._editor.adjudicate_drift(
-                [
-                    {
-                        "source": c.source,
-                        "targets": list(c.competing_targets),
-                    }
-                    for c in drift_clusters
-                ],
-                style=style,
-                conventions=conventions,
+        # A glossary entry decides its own rendering: an active one pins the decision to its
+        # target, and one under dispute (an open conflict or a non-OK status) is left to the user.
+        glossary_by_source = {
+            normalize_match_text(t.source).strip(): t for t in terms if t.type != TYPE_NAVIGATION
+        }
+        try:
+            disputed = {
+                normalize_match_text(str(c.get("source") or "")).strip()
+                for c in store.open_conflicts()
+            }
+        except Exception:  # noqa: BLE001 - storage without conflict tracking
+            disputed = set()
+        to_adjudicate: list[DriftCluster] = []
+        for cluster in drift_clusters:
+            key = normalize_match_text(cluster.source).strip()
+            entry = glossary_by_source.get(key)
+            if key in disputed or (entry is not None and entry.status != STATUS_OK):
+                continue
+            if entry is not None and entry.target.strip():
+                drift_decisions[cluster.source] = entry.target.strip()
+            else:
+                to_adjudicate.append(cluster)
+        if to_adjudicate:
+            drift_decisions.update(
+                self._editor.adjudicate_drift(
+                    [
+                        {
+                            "source": c.source,
+                            "targets": list(c.competing_targets),
+                        }
+                        for c in to_adjudicate
+                    ],
+                    style=style,
+                    conventions=conventions,
+                )
             )
         if drift_decisions:
             drift_items: list[tuple[Chapter, Segment, GlossaryTerm]] = []

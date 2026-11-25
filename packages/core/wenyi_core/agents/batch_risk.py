@@ -73,7 +73,7 @@ class BatchRiskReport:
             return ""
         # The grouped verse alert names a whole poem's paragraphs and has no other carrier, so it
         # always keeps a slot; the rest are ranked high-severity first, in paragraph order.
-        reserved = [a for a in self.alerts if a.code == "unlineated_verse"]
+        reserved = [a for a in self.alerts if a.code == "unlineated_verse"][: max(0, max_items)]
         others = [a for a in self.alerts if a.code != "unlineated_verse"]
         ranked = (
             sorted(others, key=lambda a: (not a.high_severity, a.index))[
@@ -104,7 +104,7 @@ def _inline_gloss_re(target_lang: str) -> re.Pattern[str] | None:
         # Spaced scripts need a word boundary after the marker; unspaced scripts have none.
         last = marker[-1]
         bounded = last.isalpha() and not _CJK_CHAR_RE.match(last) and not _KANA_CHAR_RE.match(last)
-        return re.escape(marker) + (r"(?![^\W\d_])" if bounded else "")
+        return re.escape(marker) + (r"(?!\w)" if bounded else "")
 
     alternatives = "|".join(marker_pattern(m) for m in sorted(markers, key=len, reverse=True))
     return re.compile(rf"[(（]\s*(?:{alternatives})[^()（）]{{1,80}}[)）]", re.IGNORECASE)

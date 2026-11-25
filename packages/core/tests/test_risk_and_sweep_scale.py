@@ -682,9 +682,10 @@ def test_drift_keeps_one_slot_for_overlapping_watched_titles():
     assert len(clusters) == 1
 
 
-def test_consistency_sweep_checks_watched_titles_that_are_also_in_the_glossary(tmp_path):
+def _sweep_title_split(tmp_path, *, terms, conflicts=()):
     from unittest.mock import Mock
 
+    from wenyi_core.agents.sparse_editor import SparseEditResult
     from wenyi_core.pipeline.translate.consistency_sweep import ConsistencySweepService
     from wenyi_core.storage.file import FileStorage
 
@@ -693,18 +694,74 @@ def test_consistency_sweep_checks_watched_titles_that_are_also_in_the_glossary(t
     rows1 = [("国主下旨。", "Then the king waited.")] * 3
     for chapter in _chapters([rows0, rows1]):
         store.save_chapter(chapter)
+    store.open_conflicts = lambda: list(conflicts)
     editor = Mock()
-    editor.adjudicate_drift.return_value = {}
+    editor.adjudicate_drift.return_value = {"国主": "the sovereign"}
+    editor.edit_batch.side_effect = lambda sources, drafts, **_: SparseEditResult(
+        targets=tuple(drafts), patched_indices=(), reasons={}
+    )
     svc = ConsistencySweepService(editor, source_lang="zh", target_lang="en")
     svc.run(
         store,
         chapter_indices=[0, 1],
-        # A generic title the glossary-miss pass skips, so only drift detection can see it.
-        terms=[GlossaryTerm(source="国主", target="the king", type="term")],
+        terms=terms,
         divergent_titles={"国主": ("the sovereign", "the king")},
     )
+    return editor
+
+
+def test_consistency_sweep_pins_watched_title_drift_to_its_glossary_target(tmp_path):
+    # A generic title the glossary-miss pass skips, so only drift detection sees the split.
+    editor = _sweep_title_split(
+        tmp_path, terms=[GlossaryTerm(source="国主", target="the king", type="term")]
+    )
+    # The glossary decides; the adjudicator never overrides it.
+    editor.adjudicate_drift.assert_not_called()
+    patched_terms = {
+        (t.source, t.target)
+        for call in editor.edit_batch.call_args_list
+        for t in call.kwargs["glossary_terms"]
+    }
+    assert patched_terms == {("国主", "the king")}
+
+
+def test_consistency_sweep_leaves_disputed_titles_to_the_user(tmp_path):
+    editor = _sweep_title_split(
+        tmp_path,
+        terms=[GlossaryTerm(source="国主", target="the king", type="term")],
+        conflicts=[{"source": "国主", "proposed_target": "the sovereign"}],
+    )
+    editor.adjudicate_drift.assert_not_called()
+    editor.edit_batch.assert_not_called()
+
+
+def test_consistency_sweep_adjudicates_unglossed_watched_titles(tmp_path):
+    editor = _sweep_title_split(tmp_path, terms=[])
     clusters = editor.adjudicate_drift.call_args.args[0]
     assert [c["source"] for c in clusters] == ["国主"]
+
+
+def test_drift_anchors_short_renderings_and_prefers_probe_words():
+    scenery0 = [("Don Pedro entra al castillo.", "Don Pedro entered the castle.")] * 3
+    scenery1 = [("Don Pedro entra al palacio.", "Don Pedro entered the palace.")] * 3
+    assert (
+        detect_mid_frequency_drift(
+            _chapters([scenery0, scenery1]),
+            source_lang="es",
+            target_lang="en",
+            extra_watch_sources={"Don": ("Don", "Sir")},
+        )
+        == []
+    )
+    king0 = [("Le roi aida les gardes.", "The king helped the castle guards.")] * 3
+    king1 = [("Le roi aida les soldats.", "The monarch helped the palace soldiers.")] * 3
+    clusters = detect_mid_frequency_drift(
+        _chapters([king0, king1]),
+        source_lang="fr",
+        target_lang="en",
+        extra_watch_sources={"roi": ("the king", "the monarch")},
+    )
+    assert [{w for w, _ in c.competing_targets} for c in clusters] == [{"king", "monarch"}]
 
 
 def test_verse_alert_keeps_its_slot_in_a_full_alert_budget():
@@ -734,6 +791,8 @@ def test_inline_gloss_markers_come_from_the_target_language():
         return any(a.code == "inline_gloss" for a in report.alerts)
 
     assert not flagged("It was a good (meaningful) choice.", "en")
+    assert not flagged("See the field (meaning_test) below.", "en")
+    assert flagged("He bowed (translator’s note: a court gesture).", "en")
     assert flagged("Il hocha la tête (litt. « oui »).", "fr")
     assert flagged("他点头（直译为“是”）。", "zh")
     # A language without markers in its profile gets no inline-gloss alert.
