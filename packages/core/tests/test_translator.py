@@ -209,6 +209,7 @@ class TestTranslatorAlignment(unittest.TestCase):
             "bare broken array": '["译文</translations>}Wait, JSON only.{',
             "other object": '{"translation":"译文"}',
             "unquoted key": '{translations: ["译文"]} Wait, let me produce correct JSON.',
+            "reasoning prefix": 'Wait, the output format requires JSON only {"translations":["译文"]}',
         }
         for label, reply in cases.items():
             with self.subTest(label):
@@ -226,8 +227,11 @@ class TestTranslatorAlignment(unittest.TestCase):
         for source, reply, expected in (
             ("あ", '```json\n{"translations":["译文"]}\n```', "译文"),
             ("あ", "[System] 译文", "[System] 译文"),
-            # A JSON source paragraph may translate to JSON in plain-text mode.
+            # A JSON source paragraph may translate to JSON in plain-text mode, but an intact
+            # envelope is still unwrapped.
             ('{"名前": "値"}', '{"name": "value"}', '{"name": "value"}'),
+            ('{"名前": "値"}', '{"translations":["{\\"name\\": 1}"]}', '{"name": 1}'),
+            ("あ", "```\nThe night was cold.\n```", "The night was cold."),
         ):
             with self.subTest(reply):
                 translator = Translator(

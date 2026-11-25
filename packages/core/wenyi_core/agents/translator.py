@@ -25,9 +25,38 @@ from .note_tools import batch_note_tools
 
 _LOGGER = logging.getLogger(__name__)
 _LEGACY_GLOSSARY_PLACEHOLDER_RE = re.compile(r"\$(?:\{glossary\}|glossary\b)")
-# A plain-text reply shaped like a code fence, a JSON object or a string array. Prose that
-# merely opens with a bracket ("[System] …") does not match.
-_JSON_ATTEMPT_RE = re.compile(r'^(?:```|\{|\[\s*")')
+# A reply shaped like a JSON object or string array. Prose that merely opens with a bracket
+# ("[System] …") does not match.
+_JSON_ATTEMPT_RE = re.compile(r'^\s*(?:\{|\[\s*")')
+# The translations key, quoted or not, anywhere in a reply.
+_ENVELOPE_KEY_RE = re.compile(r'\btranslations"?\s*:')
+_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)\n?```", re.DOTALL)
+
+
+def _plain_text_target(text: str, source: str) -> str:
+    """Return the paragraph from a plain-text-mode reply, refusing JSON wrappers.
+
+    An intact single-item ``translations`` envelope is unwrapped. Any other reply that
+    mentions the envelope key, or that is JSON-shaped while the source is not, may carry
+    model reasoning around the translation and is rejected. A code fence around prose is
+    peeled.
+    """
+    fence = _FENCE_RE.fullmatch(text)
+    body = fence.group(1).strip() if fence else text
+    if _JSON_ATTEMPT_RE.match(body):
+        try:
+            parsed = parse_json_result(body)
+        except JsonParseError:
+            parsed = None
+        if parsed is not None and parsed.safe_for_complete_payload:
+            value = parsed.value
+            items = value.get("translations") if isinstance(value, dict) else None
+            if isinstance(items, list) and len(items) == 1 and isinstance(items[0], str):
+                return items[0].strip()
+    source_is_json = bool(_JSON_ATTEMPT_RE.match(source)) or bool(_ENVELOPE_KEY_RE.search(source))
+    if not source_is_json and (_ENVELOPE_KEY_RE.search(text) or _JSON_ATTEMPT_RE.match(body)):
+        raise AlignmentError("The plain-text translation fallback returned a JSON wrapper")
+    return body if fence and not source_is_json else text
 
 
 class AlignmentError(Exception):
@@ -490,20 +519,7 @@ class Translator(Agent):
             raise AlignmentError(
                 "The translation response reached the output token limit"
             ) from error
-        text = (raw or "").strip()
-        # A source paragraph that is itself JSON or code may legitimately translate to JSON.
-        if _JSON_ATTEMPT_RE.match(text) and not _JSON_ATTEMPT_RE.match(source.strip()):
-            # The model answered with a JSON envelope despite plain-text mode. Accept only an
-            # intact single-item envelope: a broken one can carry reasoning around the text.
-            try:
-                parsed = parse_json_result(text)
-            except JsonParseError as error:
-                raise AlignmentError(
-                    "The plain-text translation fallback returned broken JSON"
-                ) from error
-            if not parsed.safe_for_complete_payload:
-                raise AlignmentError("The plain-text translation fallback returned broken JSON")
-            text = self._extract_batch_items(parsed.value, 1)[0].strip()
+        text = _plain_text_target((raw or "").strip(), source)
         if not text:
             raise _EmptyTranslationError("The model returned an empty or non-string translation")
         return text
