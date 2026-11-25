@@ -209,6 +209,7 @@ class TestTranslatorAlignment(unittest.TestCase):
             "bare broken array": '["译文</translations>}Wait, JSON only.{',
             "other object": '{"translation":"译文"}',
             "unquoted key": '{translations: ["译文"]} Wait, let me produce correct JSON.',
+            "empty object": "{}",
             "reasoning prefix": 'Wait, the output format requires JSON only {"translations":["译文"]}',
         }
         for label, reply in cases.items():
@@ -246,6 +247,7 @@ class TestTranslatorAlignment(unittest.TestCase):
         for source, reply, expected in (
             ("译本：A和B", "The translations: A and B", "The translations: A and B"),
             ("彼は{name}と言った。", "{name} said it.", "{name} said it."),
+            ("那是圣诞季。", "['Tis the season.", "['Tis the season."),
             # A fenced code paragraph keeps its fence.
             (
                 '```python\nx = "值"\n```',

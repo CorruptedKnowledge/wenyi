@@ -71,10 +71,6 @@ def load_parsed_document(
         and document.meta.get("epub_objects") != OBJECT_SCHEMA_VERSION
     ):
         return None
-    # A cache from an older EPUB reader lacks fields the current reader captures (such as
-    # creators and navigation labels); reparsing is local and cheap.
-    if document.fmt == "epub" and document.meta.get("epub_schema") != EPUB_INGEST_SCHEMA:
-        return None
     document.source_path = input_path
     return document
 
@@ -106,6 +102,15 @@ def parse_document(
             if saved_mineru:
                 cached_epub_source(storage.source_dir, digest, meta[MINERU_EPUB_DIGEST])
     cached = load_parsed_document(storage, input_path, config, actual_sha256=digest)
+    # A cache from an older EPUB reader lacks fields the current reader captures (such as
+    # creators and navigation labels). Read-only views keep using it; a parse run refreshes it
+    # locally.
+    if (
+        cached is not None
+        and cached.fmt == "epub"
+        and cached.meta.get("epub_schema") != EPUB_INGEST_SCHEMA
+    ):
+        cached = None
     if cached is not None:
         document = cached
     else:

@@ -2603,8 +2603,9 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                     '<html xmlns="http://www.w3.org/1999/xhtml" '
                     'xmlns:epub="http://www.idpf.org/2007/ops">'
                     '<head xml:lang="zh"><title>目录</title></head>'
-                    '<body><nav epub:type="toc"><div><h1 class="toc" xml:lang="zh">'
-                    '<a id="start"></a>目录</h1></div><ol>'
+                    # The page heading sits in a wrapper just before the toc nav.
+                    '<body><div><h1 class="toc" xml:lang="zh"><a id="start"></a>目录</h1></div>'
+                    '<nav epub:type="toc"><ol>'
                     '<li><a href="ch1.xhtml">第一章</a></li></ol></nav></body></html>',
                 )
                 zf.writestr(

@@ -275,28 +275,24 @@ fn toc_navs(dom: &Dom) -> Vec<Id> {
         .collect()
 }
 
-/// The document `<title>` and the headings directly inside an `epub:type="toc"` nav.
+/// The document `<title>` and the headings of a navigation document, such as "Contents".
 ///
-/// These are the navigation document's own labels (for example "Contents"), as opposed to the
-/// per-entry labels returned by [`nav_labels`].
+/// Headings inside a list are entry labels (returned by [`nav_labels`]) and are excluded; a
+/// heading may sit inside the toc nav, in a wrapper, or just before it.
 pub fn nav_headings(dom: &Dom) -> Vec<Id> {
     let mut nodes: Vec<Id> = dom
         .find(0, "head")
         .and_then(|head| dom.direct(head, "title"))
         .into_iter()
         .collect();
-    for nav in toc_navs(dom) {
-        // Headings may sit in a wrapper, but those inside the entry list are entry labels.
-        nodes.extend(dom.tags(nav).filter(|&n| {
-            matches!(dom.name(n), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
-                && !dom.parents(n).take_while(|&a| a != nav).any(|a| {
-                    matches!(
-                        dom.name(a),
-                        "ol" | "ul" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                    )
-                })
-        }));
-    }
+    let heading = |n: Id| matches!(dom.name(n), "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
+    let body = dom.find(0, "body").unwrap_or(0);
+    nodes.extend(dom.tags(body).filter(|&n| {
+        heading(n)
+            && !dom
+                .parents(n)
+                .any(|a| heading(a) || matches!(dom.name(a), "ol" | "ul" | "li"))
+    }));
     nodes
 }
 
