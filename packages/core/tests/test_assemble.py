@@ -2559,7 +2559,13 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
             with self.subTest(metadata_lang=metadata_lang, translate_title=translate_title):
                 self._check_localized_metadata_export(metadata_lang, translate_title, nav_title)
 
-    def test_doc_toc_role_nav_heading_is_captured(self):
+    def test_doc_toc_role_and_untyped_nav_headings_are_captured(self):
+        for nav_attr in (' role="doc-toc"', ""):
+            with self.subTest(nav_attr=nav_attr):
+                self._check_nav_heading_capture(nav_attr)
+
+    def _check_nav_heading_capture(self, nav_attr: str) -> None:
+        from wenyi_core.assemble.writer import assemble
         from wenyi_core.ingest.epub_reader import read_epub
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2579,16 +2585,17 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                     '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
                     '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
                     "<dc:title>书</dc:title><dc:language>zh</dc:language></metadata><manifest>"
-                    '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" '
+                    # A declared nav document whose name gives no hint of navigation.
+                    '<item id="nav" href="contents.xhtml" media-type="application/xhtml+xml" '
                     'properties="nav"/>'
                     '<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>'
                     '</manifest><spine><itemref idref="c1"/></spine></package>',
                 )
                 zf.writestr(
-                    "OEBPS/nav.xhtml",
+                    "OEBPS/contents.xhtml",
                     '<?xml version="1.0" encoding="utf-8"?>'
                     '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>书</title></head>'
-                    '<body><nav role="doc-toc"><h1>目录</h1><ol>'
+                    f"<body><nav{nav_attr}><h1>目录</h1><ol>"
                     '<li><a href="ch1.xhtml">第一章</a></li></ol></nav></body></html>',
                 )
                 zf.writestr(
@@ -2600,6 +2607,20 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
 
             doc = read_epub(src_epub, source_lang="zh", target_lang="en")
             self.assertEqual(doc.meta["epub_nav_titles"], ["书", "目录"])
+            store = FileStorage(os.path.join(tmp, "state"))
+            store.init_from_document(doc)
+            manifest = store.load_manifest()
+            manifest["meta"]["epub_nav_titles_translated"] = ["Book", "Contents"]
+            store.save_manifest(manifest)
+            ch = store.load_chapter(0)
+            for seg in ch.segments:
+                seg.target = "Chapter 1" if seg.kind == "heading" else "Body text."
+            store.save_chapter(ch)
+            out_epub = os.path.join(tmp, "book.en.epub")
+            assemble(store, src_epub, out_epub, out_format="epub")
+            with zipfile.ZipFile(out_epub) as zf:
+                nav = BeautifulSoup(zf.read("OEBPS/contents.xhtml"), "html.parser")
+            self.assertEqual(nav.find("h1").get_text(), "Contents")
 
     def _check_localized_metadata_export(
         self, metadata_lang: str, translate_title: bool | str, nav_title: str

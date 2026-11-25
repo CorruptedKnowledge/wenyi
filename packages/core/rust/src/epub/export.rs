@@ -727,21 +727,7 @@ fn replace<'a>(
 }
 
 fn rewrite_nav(dom: &mut Dom, path: &str, options: &Options) {
-    let name = path.to_ascii_lowercase();
-    if !name.contains("nav")
-        && !name.contains("toc")
-        && !dom.tags(0).any(|n| {
-            dom.name(n) == "nav" && {
-                dom.attr(n, "role") == Some("doc-toc")
-                    || ["epub:type", "type", "role"]
-                        .into_iter()
-                        .find_map(|a| dom.attr(n, a).filter(|s| !s.is_empty()))
-                        .is_some_and(|s| s.split_whitespace().any(|s| s == "toc"))
-            }
-        })
-    {
-        return;
-    }
+    // Declared navigation documents carry their page labels whatever their name or marker.
     if let Some(p) = options
         .presentation
         .as_ref()
@@ -761,6 +747,21 @@ fn rewrite_nav(dom: &mut Dom, path: &str, options: &Options) {
                 replace_label(dom, node, &title, &p.lang);
             }
         }
+    }
+    let name = path.to_ascii_lowercase();
+    if !name.contains("nav")
+        && !name.contains("toc")
+        && !dom.tags(0).any(|n| {
+            dom.name(n) == "nav" && {
+                dom.attr(n, "role") == Some("doc-toc")
+                    || ["epub:type", "type", "role"]
+                        .into_iter()
+                        .find_map(|a| dom.attr(n, a).filter(|s| !s.is_empty()))
+                        .is_some_and(|s| s.split_whitespace().any(|s| s == "toc"))
+            }
+        })
+    {
+        return;
     }
     let entries: HashMap<_, _> = options
         .toc_entries
