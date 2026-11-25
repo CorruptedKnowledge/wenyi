@@ -25,9 +25,9 @@ from .note_tools import batch_note_tools
 
 _LOGGER = logging.getLogger(__name__)
 _LEGACY_GLOSSARY_PLACEHOLDER_RE = re.compile(r"\$(?:\{glossary\}|glossary\b)")
-# A plain-text reply shaped like a JSON object or string array, optionally fenced. Prose that
+# A plain-text reply shaped like a code fence, a JSON object or a string array. Prose that
 # merely opens with a bracket ("[System] …") does not match.
-_JSON_ATTEMPT_RE = re.compile(r'^(?:```(?:json)?\s*)?(?:\{\s*"|\[\s*")', re.IGNORECASE)
+_JSON_ATTEMPT_RE = re.compile(r'^(?:```|\{|\[\s*")')
 
 
 class AlignmentError(Exception):
@@ -491,7 +491,8 @@ class Translator(Agent):
                 "The translation response reached the output token limit"
             ) from error
         text = (raw or "").strip()
-        if _JSON_ATTEMPT_RE.match(text):
+        # A source paragraph that is itself JSON or code may legitimately translate to JSON.
+        if _JSON_ATTEMPT_RE.match(text) and not _JSON_ATTEMPT_RE.match(source.strip()):
             # The model answered with a JSON envelope despite plain-text mode. Accept only an
             # intact single-item envelope: a broken one can carry reasoning around the text.
             try:

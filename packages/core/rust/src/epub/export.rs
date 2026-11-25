@@ -749,7 +749,8 @@ fn rewrite_nav(dom: &mut Dom, path: &str, options: &Options) {
     {
         for node in nav_headings(dom) {
             let source = dom.text(node, " ", true);
-            // An unchanged label (fallback or identical translation) keeps its source language.
+            // An unchanged label (fallback or identical translation) is left alone, so a
+            // language declared on it or a wrapper inside the nav still applies.
             if let Some(title) = p
                 .nav_titles
                 .get(&source)

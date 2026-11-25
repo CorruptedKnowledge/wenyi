@@ -77,7 +77,8 @@ pub fn package(zip: &mut Archive) -> Result<Package> {
     let mut title = String::new();
     let mut description = String::new();
     let mut subjects = Vec::new();
-    let mut creators = Vec::new();
+    // Export prefers Dublin Core creators, so positions must come from the same set.
+    let (mut dc_creators, mut other_creators) = (Vec::new(), Vec::new());
     let mut split_nested_toc = false;
     let mut items = IndexMap::new();
     let (mut spine_ids, mut toc_ids, mut manifest) = (Vec::new(), Vec::new(), Vec::new());
@@ -103,7 +104,11 @@ pub fn package(zip: &mut Archive) -> Result<Package> {
             "creator" => {
                 let text = strip(n.text().unwrap_or(""));
                 if !text.is_empty() {
-                    creators.push(text.to_owned());
+                    if n.tag_name().namespace() == Some("http://purl.org/dc/elements/1.1/") {
+                        dc_creators.push(text.to_owned());
+                    } else {
+                        other_creators.push(text.to_owned());
+                    }
                 }
             }
             "item" => {
@@ -171,7 +176,11 @@ pub fn package(zip: &mut Archive) -> Result<Package> {
         title,
         description,
         subjects,
-        creators,
+        creators: if dc_creators.is_empty() {
+            other_creators
+        } else {
+            dc_creators
+        },
         spine,
         manifest,
         toc_paths,

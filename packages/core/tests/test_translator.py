@@ -208,6 +208,7 @@ class TestTranslatorAlignment(unittest.TestCase):
             "fenced broken": '```json\n{"translations":["译文</translations>}Wait.{\n```',
             "bare broken array": '["译文</translations>}Wait, JSON only.{',
             "other object": '{"translation":"译文"}',
+            "unquoted key": '{translations: ["译文"]} Wait, let me produce correct JSON.',
         }
         for label, reply in cases.items():
             with self.subTest(label):
@@ -222,9 +223,11 @@ class TestTranslatorAlignment(unittest.TestCase):
                 with pytest.raises(Exception, match="failed at paragraph 0"):
                     translator.translate_batch(["あ"])
 
-        for reply, expected in (
-            ('```json\n{"translations":["译文"]}\n```', "译文"),
-            ("[System] 译文", "[System] 译文"),
+        for source, reply, expected in (
+            ("あ", '```json\n{"translations":["译文"]}\n```', "译文"),
+            ("あ", "[System] 译文", "[System] 译文"),
+            # A JSON source paragraph may translate to JSON in plain-text mode.
+            ('{"名前": "値"}', '{"name": "value"}', '{"name": "value"}'),
         ):
             with self.subTest(reply):
                 translator = Translator(
@@ -235,7 +238,7 @@ class TestTranslatorAlignment(unittest.TestCase):
                     ),
                     self._config(),
                 )
-                self.assertEqual(translator.translate_batch(["あ"]), [expected])
+                self.assertEqual(translator.translate_batch([source]), [expected])
 
     def test_unsafe_repair_in_empty_follow_up_uses_plain_text_mode(self):
         replies = [

@@ -39,7 +39,7 @@ class TitleTranslator(Agent):
             )
         except UnsafeJsonRepairError:
             # Repair can fold stray reasoning into a title while keeping the count; sample once
-            # more and let a second unsafe reply fail the batch.
+            # more and let a second unsafe reply stop the title run like any unusable JSON.
             data, _raw = self._complete_json_turn(
                 messages, operation="translation.title", require_complete_payload=True
             )

@@ -2583,6 +2583,8 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                     'unique-identifier="id" xml:lang="zh-CN">'
                     f'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"{metadata_attr}>'
                     '<dc:identifier id="id">urn:uuid:1</dc:identifier>'
+                    # A non-Dublin-Core creator must not shift translated creator positions.
+                    '<x:creator xmlns:x="urn:example">扩展作者</x:creator>'
                     "<dc:title>特拉福买家俱乐部</dc:title><dc:creator>夕山白石</dc:creator>"
                     "<dc:publisher>某出版社</dc:publisher><dc:language>zh</dc:language>"
                     '<meta property="schema:accessibilitySummary">无障碍说明</meta>'
