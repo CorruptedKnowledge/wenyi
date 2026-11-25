@@ -449,6 +449,28 @@ def test_old_parsed_cache_is_not_used_to_initialize_object_blind_state(tmp_path)
     assert load_parsed_document(store, str(path), config) is None
 
 
+def test_parsed_cache_from_older_epub_reader_is_reparsed(tmp_path):
+    path = tmp_path / "source.epub"
+    write_epub(path)
+    doc = read_epub(str(path), "en", "zh")
+    config = Config.from_dict({"llm": {"preset": "fake"}})
+    _, store, _ = service(tmp_path, lambda *_: pytest.fail("Parsing is model-free"))
+    manifest = store.stage_document(doc)
+    store.save_manifest(manifest)
+    cache = {
+        "source_sha256": manifest["source_sha256"],
+        "ingest_config": ingest_config(config),
+        "document": doc.model_dump(mode="json"),
+    }
+    store.write_artifact("parsed_document.json", cache)
+    assert load_parsed_document(store, str(path), config) is not None
+
+    # A pre-upgrade cache lacks creators and navigation labels.
+    cache["document"]["meta"]["epub_schema"] = 5
+    store.write_artifact("parsed_document.json", cache)
+    assert load_parsed_document(store, str(path), config) is None
+
+
 def test_unclosed_marker_failure_does_not_discard_valid_sibling(tmp_path):
     html = HTML.replace(" be positive.", "<math><mi>y</mi></math> be positive.")
     _, segments, template = annotate_epub_resource(html, 0, "chapter.xhtml")

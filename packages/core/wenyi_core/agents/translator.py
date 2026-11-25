@@ -25,12 +25,12 @@ from .note_tools import batch_note_tools
 
 _LOGGER = logging.getLogger(__name__)
 _LEGACY_GLOSSARY_PLACEHOLDER_RE = re.compile(r"\$(?:\{glossary\}|glossary\b)")
-# A reply shaped like a JSON object or string array. Prose that merely opens with a bracket
-# ("[System] …") does not match.
-_JSON_ATTEMPT_RE = re.compile(r'^\s*(?:\{|\[\s*")')
-# The translations key as JSON writes it: quoted, or unquoted right after an opening brace.
-# Prose such as "The translations: …" does not match.
-_ENVELOPE_KEY_RE = re.compile(r'(?:"translations"|\{\s*translations)\s*:')
+# A reply shaped like a JSON object (a brace followed by a key) or string array. Prose that
+# merely opens with a bracket ("[System] …", "{name} said") does not match.
+_JSON_ATTEMPT_RE = re.compile(r"""^\s*(?:\{\s*(?:["']|\w+\s*:)|\[\s*["'])""")
+# The translations key as JSON-like output writes it: quoted, or unquoted right after an
+# opening brace. Prose such as "The translations: …" does not match.
+_ENVELOPE_KEY_RE = re.compile(r"""(?:(["'])translations\1|\{\s*translations)\s*:""")
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)\n?```", re.DOTALL)
 
 

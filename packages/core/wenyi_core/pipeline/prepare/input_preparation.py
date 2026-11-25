@@ -41,6 +41,10 @@ def ingest_config(config: Config) -> dict[str, Any]:
     return data
 
 
+# Matches "epub_schema" written by the native EPUB reader (rust/src/epub/ingest.rs).
+EPUB_INGEST_SCHEMA = 6
+
+
 def load_parsed_document(
     storage: Storage, input_path: str, config: Config, *, actual_sha256: str | None = None
 ) -> Document | None:
@@ -66,6 +70,10 @@ def load_parsed_document(
         uses_epub_template(document.fmt, document.meta)
         and document.meta.get("epub_objects") != OBJECT_SCHEMA_VERSION
     ):
+        return None
+    # A cache from an older EPUB reader lacks fields the current reader captures (such as
+    # creators and navigation labels); reparsing is local and cheap.
+    if document.fmt == "epub" and document.meta.get("epub_schema") != EPUB_INGEST_SCHEMA:
         return None
     document.source_path = input_path
     return document

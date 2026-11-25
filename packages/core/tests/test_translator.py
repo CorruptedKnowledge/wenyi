@@ -227,6 +227,7 @@ class TestTranslatorAlignment(unittest.TestCase):
         for source, reply in (
             # Reasoning before an envelope is rejected even for a JSON source.
             ('{"名称": "值"}', 'Wait, JSON only. {"translations":["value"]}'),
+            ("あ", "Wait, JSON only. {'translations': ['The night was cold.']}"),
             # A prose source mentioning "translations:" does not exempt a broken envelope.
             ("他检查了译文：全错了。", '{"translations":["He checked."} Wait, JSON only.'),
         ):
@@ -244,6 +245,7 @@ class TestTranslatorAlignment(unittest.TestCase):
 
         for source, reply, expected in (
             ("译本：A和B", "The translations: A and B", "The translations: A and B"),
+            ("彼は{name}と言った。", "{name} said it.", "{name} said it."),
             # A fenced code paragraph keeps its fence.
             (
                 '```python\nx = "值"\n```',
