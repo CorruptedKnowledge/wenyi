@@ -15,7 +15,7 @@ import re
 from ..alignment.objects import marked_sources
 from ..glossary.store import GlossaryStore
 from ..i18n import genres
-from ..llm.json_parser import JsonParseError, UnsafeJsonRepairError
+from ..llm.json_parser import JsonParseError, UnsafeJsonRepairError, parse_json_result
 from ..llm.preflight import fit_prompt_to_context_window
 from ..llm.retrying import TruncatedResponseError
 from ..models.glossary import TYPE_NAVIGATION, GlossaryTerm
@@ -25,6 +25,9 @@ from .note_tools import batch_note_tools
 
 _LOGGER = logging.getLogger(__name__)
 _LEGACY_GLOSSARY_PLACEHOLDER_RE = re.compile(r"\$(?:\{glossary\}|glossary\b)")
+# A plain-text reply shaped like a JSON object or string array, optionally fenced. Prose that
+# merely opens with a bracket ("[System] …") does not match.
+_JSON_ATTEMPT_RE = re.compile(r'^(?:```(?:json)?\s*)?(?:\{\s*"|\[\s*")', re.IGNORECASE)
 
 
 class AlignmentError(Exception):
@@ -488,18 +491,18 @@ class Translator(Agent):
                 "The translation response reached the output token limit"
             ) from error
         text = (raw or "").strip()
-        if text.startswith("{"):
+        if _JSON_ATTEMPT_RE.match(text):
+            # The model answered with a JSON envelope despite plain-text mode. Accept only an
+            # intact single-item envelope: a broken one can carry reasoning around the text.
             try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict) and "translations" in parsed:
-                items = self._extract_batch_items(parsed, 1)
-                text = items[0].strip()
-            elif parsed is None and '"translations"' in text:
-                # A broken JSON envelope can carry reasoning around the translation; never
-                # save it as plain prose.
+                parsed = parse_json_result(text)
+            except JsonParseError as error:
+                raise AlignmentError(
+                    "The plain-text translation fallback returned broken JSON"
+                ) from error
+            if not parsed.safe_for_complete_payload:
                 raise AlignmentError("The plain-text translation fallback returned broken JSON")
+            text = self._extract_batch_items(parsed.value, 1)[0].strip()
         if not text:
             raise _EmptyTranslationError("The model returned an empty or non-string translation")
         return text

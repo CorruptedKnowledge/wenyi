@@ -2547,11 +2547,19 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
 
     def test_epub_template_export_localizes_creator_nav_heading_and_package_lang(self):
         """Author, nav-document heading and package language follow the target language."""
-        for metadata_lang, translate_title in (("", True), ("ja", True), ("", False)):
+        for metadata_lang, translate_title, nav_title in (
+            ("", True, "Contents"),
+            ("ja", True, "Contents"),
+            ("", False, "Contents"),
+            # Metadata already in the target language and an unchanged nav label stay as is.
+            ("en", True, "目录"),
+        ):
             with self.subTest(metadata_lang=metadata_lang, translate_title=translate_title):
-                self._check_localized_metadata_export(metadata_lang, translate_title)
+                self._check_localized_metadata_export(metadata_lang, translate_title, nav_title)
 
-    def _check_localized_metadata_export(self, metadata_lang: str, translate_title: bool) -> None:
+    def _check_localized_metadata_export(
+        self, metadata_lang: str, translate_title: bool, nav_title: str
+    ) -> None:
         from wenyi_core.assemble.writer import assemble
         from wenyi_core.ingest.epub_reader import read_epub
 
@@ -2577,6 +2585,8 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                     '<dc:identifier id="id">urn:uuid:1</dc:identifier>'
                     "<dc:title>特拉福买家俱乐部</dc:title><dc:creator>夕山白石</dc:creator>"
                     "<dc:publisher>某出版社</dc:publisher><dc:language>zh</dc:language>"
+                    '<meta property="schema:accessibilitySummary">无障碍说明</meta>'
+                    '<meta property="dcterms:modified">2026-01-01T00:00:00Z</meta>'
                     "</metadata><manifest>"
                     '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" '
                     'properties="nav"/>'
@@ -2587,7 +2597,8 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
                     "OEBPS/nav.xhtml",
                     '<?xml version="1.0" encoding="utf-8"?>'
                     '<html xmlns="http://www.w3.org/1999/xhtml" '
-                    'xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head>'
+                    'xmlns:epub="http://www.idpf.org/2007/ops">'
+                    '<head xml:lang="zh"><title>目录</title></head>'
                     '<body><nav epub:type="toc"><div><h1 class="toc" xml:lang="zh">'
                     '<a id="start"></a>目录</h1></div><ol>'
                     '<li><a href="ch1.xhtml">第一章</a></li></ol></nav></body></html>',
@@ -2608,7 +2619,7 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
             if translate_title:
                 manifest["meta"]["book_title_translated"] = "The Trafford Buyers Club"
             manifest["meta"]["epub_creators_translated"] = ["Xishan Baishi"]
-            manifest["meta"]["epub_nav_titles_translated"] = ["Contents"]
+            manifest["meta"]["epub_nav_titles_translated"] = [nav_title]
             manifest["chapters"][0]["title_translated"] = "Chapter 1"
             for entry in manifest["meta"]["toc_entries"]:
                 entry["title_translated"] = "Chapter 1"
@@ -2640,21 +2651,40 @@ class TestEpubTocMisdetectRegression(unittest.TestCase):
             self.assertEqual(package.get("xml:lang"), "en")
             creator = opf.find("dc:creator")
             assert isinstance(creator, Tag)
-            self.assertEqual((creator.get_text(), creator.get("xml:lang")), ("Xishan Baishi", "en"))
+            if metadata_lang == "en":
+                # The creator already inherits the target language, so it stays as published.
+                self.assertEqual((creator.get_text(), creator.get("xml:lang")), ("夕山白石", None))
+            else:
+                self.assertEqual(
+                    (creator.get_text(), creator.get("xml:lang")), ("Xishan Baishi", "en")
+                )
             # Untranslated metadata keeps the source label it previously inherited.
+            inherited_source = None if metadata_lang else "zh-CN"
             publisher = opf.find("dc:publisher")
             assert isinstance(publisher, Tag)
             self.assertEqual(
-                (publisher.get_text(), publisher.get("xml:lang")),
-                ("某出版社", None if metadata_lang else "zh-CN"),
+                (publisher.get_text(), publisher.get("xml:lang")), ("某出版社", inherited_source)
             )
+            summary = opf.find("meta", property="schema:accessibilitySummary")
+            assert isinstance(summary, Tag)
+            self.assertEqual(summary.get("xml:lang"), inherited_source)
+            self.assertIsNone(opf.find("meta", property="dcterms:modified").get("xml:lang"))
             self.assertIsNone(opf.find("dc:identifier").get("xml:lang"))
-            self.assertEqual(nav.find("title").get_text(), "Contents")
+            nav_head_title = nav.find("title")
             heading = nav.find("h1")
-            assert isinstance(heading, Tag)
-            self.assertEqual(heading.get_text(), "Contents")
-            self.assertEqual(heading.get("xml:lang"), "en")
+            assert isinstance(nav_head_title, Tag) and isinstance(heading, Tag)
             self.assertIsNotNone(heading.find("a", id="start"))
+            if nav_title == "目录":
+                self.assertEqual(
+                    (nav_head_title.get_text(), nav_head_title.get("lang")), ("目录", None)
+                )
+                self.assertEqual((heading.get_text(), heading.get("xml:lang")), ("目录", "zh"))
+            else:
+                # The <title> inherited zh from <head>, so it now declares the target itself.
+                self.assertEqual(
+                    (nav_head_title.get_text(), nav_head_title.get("xml:lang")), ("Contents", "en")
+                )
+                self.assertEqual((heading.get_text(), heading.get("xml:lang")), ("Contents", "en"))
             self.assertEqual(nav.find("ol").find("a").get_text(), "Chapter 1")
             paragraphs = ch1.find_all("p")
             self.assertEqual(str(paragraphs[0]), "<p>Body text.</p>")

@@ -748,11 +748,13 @@ fn rewrite_nav(dom: &mut Dom, path: &str, options: &Options) {
         .filter(|p| !p.nav_titles.is_empty() && options.toc_paths.contains(path))
     {
         for node in nav_headings(dom) {
+            let source = dom.text(node, " ", true);
+            // An unchanged label (fallback or identical translation) keeps its source language.
             if let Some(title) = p
                 .nav_titles
-                .get(&dom.text(node, " ", true))
+                .get(&source)
                 .map(|s| strip(s))
-                .filter(|s| !s.is_empty())
+                .filter(|s| !s.is_empty() && *s != source)
             {
                 let title = title.to_owned();
                 replace_label(dom, node, &title, &p.lang);
@@ -815,12 +817,22 @@ fn replace_label(dom: &mut Dom, node: Id, title: &str, lang: &str) {
             _ => return,
         }
     }
-    for id in chain {
+    let mut declared = false;
+    for &id in &chain {
         for key in ["lang", "xml:lang"] {
             if dom.attr(id, key).is_some() {
                 dom.set(id, key, lang.to_owned());
+                declared = true;
             }
         }
+    }
+    // A label inheriting another language from <head> or <nav> declares the target itself.
+    let inherited = dom
+        .parents(node)
+        .find_map(|a| dom.attr(a, "xml:lang").or_else(|| dom.attr(a, "lang")));
+    if !declared && inherited.is_some_and(|value| !same_language(value, lang)) {
+        dom.set(node, "lang", lang.to_owned());
+        dom.set(node, "xml:lang", lang.to_owned());
     }
 }
 
@@ -1319,8 +1331,10 @@ fn rewrite_xml(
             for (node, translated) in creator_nodes.into_iter().zip(p.creators.iter()) {
                 let value = strip(translated);
                 // A name already tagged in the target language is kept as published.
+                // Includes a language inherited from <metadata> or the package.
                 let tagged_target = node
-                    .attribute(("http://www.w3.org/XML/1998/namespace", "lang"))
+                    .ancestors()
+                    .find_map(|a| a.attribute(("http://www.w3.org/XML/1998/namespace", "lang")))
                     .is_some_and(|lang| same_language(lang, &p.lang));
                 if !value.is_empty()
                     && !tagged_target
@@ -1335,16 +1349,24 @@ fn rewrite_xml(
         // untranslated keeps the source default through an explicit attribute.
         const XML: &str = "http://www.w3.org/XML/1998/namespace";
         if let Some(lang) = doc.root_element().attribute_node((XML, "lang")) {
-            if lang.value() != p.lang {
+            if !same_language(lang.value(), &p.lang) {
                 let mut escaped = String::new();
                 escape(&mut escaped, &p.lang, true);
                 edits.push((lang.range_value(), escaped));
                 let mut source_lang = String::new();
                 escape(&mut source_lang, lang.value(), true);
-                for node in doc.descendants().filter(|n| {
-                    n.is_element()
-                        && n.tag_name().namespace() == Some(DC)
-                        && !matches!(n.tag_name().name(), "identifier" | "language" | "date")
+                let metadata = doc.descendants().find(|n| n.has_tag_name("metadata"));
+                for node in metadata
+                    .into_iter()
+                    .flat_map(|m| m.descendants())
+                    .filter(|n| {
+                        let dc = n.tag_name().namespace() == Some(DC);
+                        n.is_element()
+                        && !(dc
+                            && matches!(n.tag_name().name(), "identifier" | "language" | "date"))
+                        && n.attribute("property") != Some("dcterms:modified")
+                        // Dates, numbers and similar values carry no language.
+                        && n.text().unwrap_or("").chars().any(char::is_alphabetic)
                         && !localized.contains(&n.id())
                         && n.attribute_node((XML, "lang")).is_none()
                         && n.ancestors()
@@ -1352,7 +1374,8 @@ fn rewrite_xml(
                             .find(|a| a.attribute_node((XML, "lang")).is_some())
                             .is_some_and(|a| a == doc.root_element())
                         && !strip(n.text().unwrap_or("")).is_empty()
-                }) {
+                    })
+                {
                     let range = node.range();
                     let at = range.start
                         + text[range]

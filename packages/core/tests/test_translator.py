@@ -203,6 +203,40 @@ class TestTranslatorAlignment(unittest.TestCase):
         with pytest.raises(Exception, match="failed at paragraph 0"):
             translator.translate_batch(["あ"])
 
+    def test_plain_text_fallback_accepts_only_intact_json_envelopes(self):
+        cases = {
+            "fenced broken": '```json\n{"translations":["译文</translations>}Wait.{\n```',
+            "bare broken array": '["译文</translations>}Wait, JSON only.{',
+            "other object": '{"translation":"译文"}',
+        }
+        for label, reply in cases.items():
+            with self.subTest(label):
+                translator = Translator(
+                    FakeClient(
+                        handler=lambda messages, tier, json_mode, reply=reply: (
+                            '{"translations":["x"</translations>}' if json_mode else reply
+                        )
+                    ),
+                    self._config(),
+                )
+                with pytest.raises(Exception, match="failed at paragraph 0"):
+                    translator.translate_batch(["あ"])
+
+        for reply, expected in (
+            ('```json\n{"translations":["译文"]}\n```', "译文"),
+            ("[System] 译文", "[System] 译文"),
+        ):
+            with self.subTest(reply):
+                translator = Translator(
+                    FakeClient(
+                        handler=lambda messages, tier, json_mode, reply=reply: (
+                            '{"translations":["x"</translations>}' if json_mode else reply
+                        )
+                    ),
+                    self._config(),
+                )
+                self.assertEqual(translator.translate_batch(["あ"]), [expected])
+
     def test_unsafe_repair_in_empty_follow_up_uses_plain_text_mode(self):
         replies = [
             json.dumps({"translations": [""]}),
