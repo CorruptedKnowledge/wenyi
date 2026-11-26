@@ -151,13 +151,46 @@ def test_repair_escaped_newlines_preserves_source_literals_code_urls_and_markers
     assert repair_escaped_newlines("第一行\n第二行", "Line 1\\nLine 2") == "Line 1\nLine 2"
     # Source already has literal \n -> untouched.
     assert repair_escaped_newlines(r"literal \n here", r"literal \n here") == r"literal \n here"
-    # Protected spans untouched.
+    # Protected spans untouched (code, URLs, markers, inline math, Windows paths, and bare \nu).
     assert (
         repair_escaped_newlines(
-            "原文", "Before `a\\nb` https://ex.com/\\n 〘object:a\\nb〙 end\\nnext"
+            "原文",
+            "Before `a\\nb` https://ex.com/\\n 〘object:a\\nb〙 $\\nu$ C:\\new\\dir \\nu end\\nnext",
         )
-        == "Before `a\\nb` https://ex.com/\\n 〘object:a\\nb〙 end\nnext"
+        == "Before `a\\nb` https://ex.com/\\n 〘object:a\\nb〙 $\\nu$ C:\\new\\dir \\nu end\nnext"
     )
+
+
+def test_sparse_editor_returns_failed_result_when_preflight_exceeds_context_window():
+    cfg = Config.from_dict(
+        {
+            "language": {"source": "zh", "target": "en"},
+            "llm": {
+                "preset": "fake",
+                "models": {"fake/tiny": {"context_window": 120, "max_output_tokens": 50}},
+                "routes": {"polish.body": {"model": "fake/tiny"}},
+            },
+            "pipeline": {"polish": True, "polish_mode": "sparse"},
+        }
+    )
+    editor = SparseSemanticEditor(
+        FakeClient(handler=lambda *a: (_ for _ in ()).throw(AssertionError("should not call LLM"))),
+        cfg,
+    )
+    res = editor.edit_batch(["原文。" * 40], ["Draft translation. " * 40])
+    assert res.failed is True
+    assert res.targets == ("Draft translation. " * 40,)
+
+
+def test_english_progress_label_renders_stable_pipeline_keys():
+    from wenyi_core.progress_labels import english_progress_label
+
+    assert english_progress_label("progress.stage.assembling") == "Assembling translation…"
+    assert english_progress_label("progress.stage.seedingGlossary") == "Seeding CJK glossary…"
+    assert english_progress_label("progress.stage.reviewRound:1") == "Whole-book review R1"
+    assert english_progress_label("progress.stage.reviewRound:2") == "Blind whole-book review R2"
+    assert english_progress_label("progress.stage.chapter:5 · draft") == "Chapter 5 · draft"
+    assert english_progress_label("Chapter 5") == "Chapter 5"
 
 
 def test_serial_resume_recovers_polish_after_escaped_newline_repair_and_done_unpolished(tmp_path):

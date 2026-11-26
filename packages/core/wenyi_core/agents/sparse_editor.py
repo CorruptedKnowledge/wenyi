@@ -215,13 +215,19 @@ class SparseSemanticEditor(Agent):
             user_parts.append(f"[Following source paragraph] (reference only)\n{next_ref}")
             return system_text, "\n\n".join(user_parts)
 
-        system_msg, user_msg, _effective, _shrunk = fit_prompt_to_context_window(
-            config=self.config,
-            operation="polish.body",
-            terms=full_glossary,
-            match_text=match_text,
-            render_messages=_render,
-        )
+        try:
+            system_msg, user_msg, _effective, _shrunk = fit_prompt_to_context_window(
+                config=self.config,
+                operation="polish.body",
+                terms=full_glossary,
+                match_text=match_text,
+                render_messages=_render,
+            )
+        except ValueError as exc:
+            _LOGGER.warning(
+                "Sparse editor prompt does not fit context window (%s); keeping drafts", exc
+            )
+            return SparseEditResult(tuple(draft_list), (), {}, failed=True)
         try:
             data, _raw = self._complete_json_turn(
                 [

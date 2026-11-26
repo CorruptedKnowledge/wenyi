@@ -13,6 +13,7 @@ from rich.progress import (
 )
 from rich.table import Column
 from rich.text import Text
+from wenyi_core.progress_labels import english_progress_label
 from wenyi_core.timing import format_duration
 
 _PROGRESS_DESCRIPTION_WIDTH = 28
@@ -73,6 +74,7 @@ class RichProgressBridge:
         `payload` is accepted for the shared progress contract; the Rich view
         only needs counts and labels.
         """
+        label = english_progress_label(label)
         stage = (label, total if total > 0 else None)
         short = _short_progress_description(label)
         if total > 0:

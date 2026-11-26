@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import re
 
-_ESCAPED_NL_RE = re.compile(r"(?<!\\)\\n")
+# Match leaked literal ``\n`` escapes while leaving standalone ``\nu`` / ``\new`` tokens
+# (preceded by whitespace/start and followed by lowercase ASCII) untouched.
+_ESCAPED_NL_RE = re.compile(r"(?<!\\)\\n(?![a-z])|(?<=[^\s\\])\\n")
 _PROTECTED_RE = re.compile(
-    r"〘object:[^〙]+〙|⟦[^⟧]+⟧|```[\s\S]*?```|`[^`\n]+`|https?://\S+",
+    r"〘object:[^〙]+〙|⟦[^⟧]+⟧|```[\s\S]*?```|`[^`\n]+`|\$\$[\s\S]*?\$\$|\$[^$\n]+\$|"
+    r"https?://\S+|[A-Za-z]:\\[^\s]+",
 )
 
 
