@@ -45,7 +45,9 @@ def test_changed_semantic_revision_refreshes_pending_work_and_keeps_completed_ta
     initial_manifest = store.load_manifest()
     monkeypatch.setattr(
         "wenyi_core.i18n.policy.resolver.honorific_rule",
-        lambda src, tgt: honorific_rule(src, tgt) + "\nKeep forms of address grounded in context.",
+        lambda src, tgt, *, genre="literary": (
+            honorific_rule(src, tgt, genre=genre) + "\nKeep forms of address grounded in context."
+        ),
     )
     client = FakeClient(handler=routing_handler) if fresh_process else initial_client
     previous_calls = len(client.calls)

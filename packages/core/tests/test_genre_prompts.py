@@ -35,17 +35,19 @@ def test_sparse_genre_overrides_inherit_literary_fragments(monkeypatch):
 
 def test_literary_defaults_cover_all_genre_slots_without_unused_entries():
     used = set()
-    for directory in ("tasks", "shared", "languages"):
+    for directory in ("tasks", "shared", "languages", "pairs"):
         for path in (DATA / directory).iterdir():
             used.update(re.findall(r"\$\{(genre_[a-z_]+)\}", path.read_text(encoding="utf-8")))
     assert used == read_json("genres/literary/fragments.json").keys()
 
 
-@pytest.mark.parametrize("directory", ["tasks", "shared", "languages"])
+@pytest.mark.parametrize("directory", ["tasks", "shared", "languages", "pairs"])
 def test_common_resources_keep_fiction_specific_wording_in_genre_slots(directory):
     biased = re.compile(
-        r"\b(novels?|fiction|fictional|literary|plot|foreshadowing|spells)\b"
-        r"|character(?:-| )voice|inner thoughts|complete story|reveal timing",
+        r"\b(novels?|fiction|fictional|literary|plot|foreshadowing|spells|"
+        r"xianxia|wuxia|cultivation|daoist|tanka|haiku)\b"
+        r"|character(?:-| )voice|inner thoughts|complete story|reveal timing"
+        r"|serial storytelling|game-like|web[- ]novel",
         re.IGNORECASE,
     )
     for path in (DATA / directory).iterdir():

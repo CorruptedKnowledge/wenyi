@@ -90,14 +90,17 @@ def _rules(context: PolicyContext) -> dict[str, str]:
     source = profile(context.source, genre=context.genre) if context.source != "auto" else {}
     source_guidance = source.get("source_guidance", common["source"])
     target_guidance = "\n".join(
-        (target["target_guidance"], read_text("shared/target_language.txt").strip())
+        (
+            target["target_guidance"],
+            compose(read_text("shared/target_language.txt").strip(), genre=context.genre),
+        )
     )
     default_guidance = "\n".join(
         (
             source_guidance,
             target_guidance,
             common["evidence"],
-            honorific_rule(context.source, context.target),
+            honorific_rule(context.source, context.target, genre=context.genre),
         )
     )
     return {

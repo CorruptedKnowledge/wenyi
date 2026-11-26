@@ -1,7 +1,7 @@
 {
   "label": "Simplified Chinese",
   "english_name": "Simplified Chinese",
-  "source_guidance": "Interpret Chinese ellipsis, contextual references and the relationship information carried by kinship terms.",
+  "source_guidance": "Interpret omitted Chinese subjects and objects, contextual references, and the relationship information carried by kinship terms.",
   "glossary_context_dependent_sources": [
     "孤",
     "朕",

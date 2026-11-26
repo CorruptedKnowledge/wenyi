@@ -29,7 +29,13 @@ RESOURCES = tuple(
 def test_academic_resources_compose_without_missing_or_fiction_specific_slots(path):
     text = compose(read_text(path), genre="academic")
     assert "${genre_" not in text
-    assert not re.search(r"\b(novels?|fiction|fictional|literary|plot|foreshadowing)\b", text)
+    assert not re.search(
+        r"\b(novels?|fiction|fictional|literary|plot|foreshadowing|"
+        r"xianxia|wuxia|cultivation|daoist|tanka|haiku)\b"
+        r"|serial storytelling|game-like|web[- ]novel",
+        text,
+        re.IGNORECASE,
+    )
     if path.endswith(".json"):
         assert isinstance(json.loads(text), dict)
     variables = {
