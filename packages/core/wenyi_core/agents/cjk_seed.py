@@ -1,4 +1,4 @@
-"""Lean CJK upfront glossary seeder for parallel ZH->EN (and future JA/KO->EN) web novels.
+"""Lean CJK upfront glossary seeder for parallel ZH->EN (and future JA/KO->EN) books.
 
 Mines recurring CJK proper-noun candidates from chapter digests (or bounded source samples
 when digests are absent) and compiles a compact canonical entity glossary in parallel
@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from ..glossary.store import GlossaryStore, GlossaryTerm
+from ..i18n import genres
 from ..i18n.languages import (
     glossary_context_dependent_sources,
     glossary_generic_target_words,
@@ -251,7 +252,7 @@ def mine_cjk_candidates(
 
 
 class CjkGlossarySeeder(Agent):
-    """Compile recurring CJK web-novel candidates into canonical glossary terms."""
+    """Compile recurring CJK book candidates into canonical glossary terms."""
 
     def seed(
         self,
@@ -339,23 +340,31 @@ class CjkGlossarySeeder(Agent):
         existing_terms: Sequence[GlossaryTerm],
     ) -> str:
         """Build a byte-stable KV-cacheable system prompt shared across all seed chunks."""
+        genre = self.language_policy.context.genre
+        prompt_vals = dict(self.language_policy.prompt_values)
+        src_label = prompt_vals.get("src_label") or self.src
+        tgt_label = prompt_vals.get("tgt_label") or self.tgt
+        project_kind = genres.compose("${genre_project_kind}", genre=genre)
+        concepts = genres.compose("${genre_glossary_concepts}", genre=genre)
+        future_details = genres.compose("${genre_glossary_future_details}", genre=genre)
+        person_label = genres.compose("${genre_person_label}", genre=genre)
         parts = [
-            f"You compile a consistent glossary for translating a {self.src} web novel into "
-            f"{self.tgt}.",
+            f"You compile a consistent glossary for translating a {src_label} {project_kind} into "
+            f"{tgt_label}.",
             "Given candidate recurring source terms with corpus frequency and a short snippet, "
-            "KEEP ONLY true recurring proper nouns and world-building terminology: character "
-            "names, places, sects/factions, cultivation realms, techniques, artifacts, and "
-            "named institutions or titles tied to one specific entity.",
+            "KEEP ONLY true recurring proper nouns and work-specific terminology: names, places, "
+            f"organizations, named roles or titles tied to one specific entity, and {concepts}.",
             "DROP ordinary words, verbs, adjectives, generic pronouns, and context-dependent "
             "address forms (e.g. 大人, 公子, 师兄, 前辈, 孤, 朕, 臣) unless attached to a specific "
             "proper name.",
-            "For every kept person, include gender ('male', 'female', or 'unknown') using only "
-            "evidence visible in the synopsis/snippet; never spoil later plot twists.",
+            f"For every kept {person_label}, include gender ('male', 'female', or 'unknown') "
+            f"using only evidence visible in the synopsis/snippet; never reveal {future_details}.",
             'Return strict JSON: {"terms":[{"source":"...","target":"...","type":"person|place|'
             'organization|term","gender":"male|female|unknown|","aliases":["..."]}]}',
         ]
         if style.strip():
-            parts.append(prompts.wrap_untrusted_style("Style guide", style.strip()))
+            style_heading = genres.compose("${genre_style_heading}", genre=genre)
+            parts.append(prompts.wrap_untrusted_style(style_heading, style.strip()))
         if book_synopsis.strip():
             parts.append(
                 prompts.wrap_untrusted_reference(
@@ -385,7 +394,7 @@ class CjkGlossarySeeder(Agent):
         user_prompt = (
             "[Candidate recurring source terms]\n"
             + "\n".join(lines)
-            + '\n\nReturn JSON {"terms":[...]} keeping only true proper nouns and key world terms.'
+            + '\n\nReturn JSON {"terms":[...]} keeping only recurring proper nouns and key domain terms.'
         )
         match_text = "\n".join(c.snippet or c.source for c in chunk)
         system_prompt, user_msg, _effective, _shrunk = fit_prompt_to_context_window(

@@ -126,14 +126,14 @@ def resolve_pair_key(src: str, tgt: str) -> str | None:
     return None
 
 
-def honorific_rule(src: str, tgt: str) -> str:
-    """Select forms-of-address guidance from the language pair, not user configuration."""
+def honorific_rule(src: str, tgt: str, *, genre: str = DEFAULT_GENRE) -> str:
+    """Select forms-of-address and pair guidance from the language pair, composed with genre."""
     rule = read_json("shared/honorific.json")["rule"]
     pair = resolve_pair_key(src, tgt)
     if pair is not None:
         pairs = read_json("pairs/registry.json")
         rule = read_json(f"pairs/{pairs[pair]}").get("honorific", rule)
-    return rule
+    return compose(rule, genre=genre)
 
 
 def validate_run_languages(manifest: dict, source: str, target: str) -> None:

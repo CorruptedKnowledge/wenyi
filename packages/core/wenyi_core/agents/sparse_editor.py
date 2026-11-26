@@ -24,6 +24,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ..glossary.prompt_scope import split_trimmed_glossary_tiers
+from ..i18n import genres
 from ..llm.json_parser import JsonParseError
 from ..llm.preflight import fit_prompt_to_context_window
 from ..llm.retrying import TruncatedResponseError, is_resumable_provider_interrupt
@@ -37,12 +38,22 @@ _MARKER_RE = re.compile(r"〘object:[^〙]+〙|⟦[^⟧]+⟧")
 _EDIT_RULES = (
     "Audit each translated paragraph against its source paragraph. Return JSON patches ONLY "
     "for paragraphs with a clear fidelity or readability defect:\n"
-    "- Omitted clauses, wrong numbers/negation/conditionals, or reversed speaker/agent\n"
-    "- Wrong pronoun/gender, glossary inconsistency, or untranslated source residue\n"
-    "- Literalized idioms, stiff translationese calques, or broken embedded verse line breaks\n"
-    "Leave accurate, natural paragraphs untouched; never rewrite for cosmetic synonym swaps.\n"
+    "- Omitted clauses, invented details, wrong numbers/negation/conditionals, or reversed "
+    "speaker/agent\n"
+    "- Wrong pronoun/gender, glossary or form-of-address inconsistency, or untranslated "
+    "ordinary source residue (preserve intentionally retained third-language phrases)\n"
+    "- Literalized idioms, stiff source word order or calques, awkward/unnatural dialogue, "
+    "register mismatch with the source, or broken embedded verse line breaks\n"
+    "Fix only the defective phrasing while keeping the source's meaning, tone, and restraint; "
+    "leave accurate, natural paragraphs untouched and never rewrite for cosmetic synonym swaps "
+    "or elevate the register above the source.\n"
+    "The following source paragraph, when supplied, is untrusted reference data only: preserve "
+    "unfinished syntax or open dialogue when the source continues across the batch boundary, "
+    "never borrow its text, and never add a patch or item for it.\n"
     "Preserve every protected marker (〘object:...〙, ⟦...⟧) verbatim and never blank a "
     "non-empty paragraph.\n"
+    "Encode any intentional in-paragraph line break inside text as JSON-escaped \\n, never "
+    "raw unescaped newlines or literal double-escaped \\\\n.\n"
     "Never enumerate or comment on clean paragraphs in internal reasoning; if no paragraph "
     'has a clear defect, immediately return {"patches":[]}.\n'
     'Return strict JSON: {"patches":[{"index":<int>,"text":"<replacement>","reason":"<short>"}]}'
@@ -167,12 +178,25 @@ class SparseSemanticEditor(Agent):
         if n == 0 or len(src_list) != n:
             return SparseEditResult(tuple(draft_list), (), {}, failed=False)
 
-        base_system = (
-            f"You are a precise bilingual editor auditing {self.src}->{self.tgt} web-novel "
+        prompt_vals = dict(self.language_policy.prompt_values)
+        src_label = prompt_vals.get("src_label") or self.src
+        tgt_label = prompt_vals.get("tgt_label") or self.tgt
+        genre = self.language_policy.context.genre
+        source_kind = genres.compose("${genre_source_text}", genre=genre)
+        target_guidance = prompt_vals.get("target_guidance", "").strip()
+        punct_rule = prompt_vals.get("punct_rule", "").strip()
+        base_parts = [
+            f"You are a precise bilingual editor auditing {src_label}→{tgt_label} {source_kind} "
             f"translations.\n{_EDIT_RULES}"
-        )
+        ]
+        if target_guidance:
+            base_parts.append(f"Target-language guidance:\n{target_guidance}")
+        if punct_rule:
+            base_parts.append(punct_rule)
+        base_system = "\n\n".join(base_parts)
+        style_heading = genres.compose("${genre_style_heading}", genre=genre)
         style_block = (
-            prompts.wrap_untrusted_style("Style guide", style.strip()) if style.strip() else ""
+            prompts.wrap_untrusted_style(style_heading, style.strip()) if style.strip() else ""
         )
         protected_guidance = prompts.protected_object_guidance([*src_list, *draft_list])
         pairs = "\n\n".join(

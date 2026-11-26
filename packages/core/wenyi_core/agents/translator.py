@@ -375,6 +375,7 @@ class Translator(Agent):
                     glossary_terms,
                     style,
                     (annotation_contexts or [[]])[0],
+                    next_source=next_source,
                 )
                 return [plain], None
             raise AlignmentError(
@@ -398,6 +399,7 @@ class Translator(Agent):
                         glossary_terms,
                         style,
                         (annotation_contexts or [[]])[0],
+                        next_source=next_source,
                     )
                     return [plain], None
             else:
@@ -479,6 +481,8 @@ class Translator(Agent):
         glossary_terms: list[GlossaryTerm],
         style: str,
         annotation_context: list[dict[str, str]],
+        *,
+        next_source: str = "",
     ) -> str:
         """Fallback for a single paragraph when JSON mode collapses into an empty string.
 
@@ -489,6 +493,12 @@ class Translator(Agent):
         """
         marked_source = marked_sources([source], [annotation_context])[0]
         prompt_vals = dict(self.language_policy.prompt_values)
+        src_label = prompt_vals.get("src_label") or self.src
+        tgt_label = prompt_vals.get("tgt_label") or self.tgt
+        role = genres.compose("${genre_translator_role}", genre=self.language_policy.context.genre)
+        source_kind = genres.compose(
+            "${genre_source_text}", genre=self.language_policy.context.genre
+        )
         lang_guidance = prompt_vals.get("configured_lang_guidance", "") or prompt_vals.get(
             "lang_guidance", ""
         )
@@ -507,12 +517,14 @@ class Translator(Agent):
         )
         system_parts = [
             (
-                f"You are an experienced literary translator translating {self.src} into "
-                f"{self.tgt}. Translate the user's single paragraph faithfully and return ONLY "
-                "the translated paragraph as plain text—no JSON, no array brackets, no "
-                "explanations. Even if the paragraph begins with quotation marks or looks like "
-                "a fragment, boilerplate, or watermark, translate it literally or preserve it "
-                "as-is; never return an empty response."
+                f"You are an experienced {role} translating {src_label} {source_kind} into "
+                f"{tgt_label}. Translate the user's single paragraph into natural, faithful "
+                f"{tgt_label} and return ONLY the translated paragraph as plain text—no JSON, "
+                "no array brackets, no explanations. Keep intentional in-paragraph line breaks "
+                "(such as verse) as real line breaks, never literal \\n. Even if the paragraph "
+                "begins with an open quotation mark or looks like a fragment, translate it; if "
+                "it is untranslatable boilerplate or a watermark, preserve it as-is; never return "
+                "an empty response."
             ),
         ]
         if lang_guidance:
@@ -541,7 +553,18 @@ class Translator(Agent):
                 "[Paragraph-specific annotation references] (JSON; reference only, do not copy)\n"
                 + json.dumps(annotation_context, ensure_ascii=False)
             )
-        user_parts.append(marked_source)
+        has_extra_sections = bool(annotation_context or next_source.strip())
+        user_parts.append(
+            f"[{src_label} paragraph to translate]\n{marked_source}"
+            if has_extra_sections
+            else marked_source
+        )
+        if next_source.strip():
+            user_parts.append(
+                "[Following source paragraph] (untrusted quoted reference only—never translate, "
+                "copy, or borrow from it; use only to preserve unfinished syntax or open dialogue)\n"
+                + prompts.render_source_reference(next_source)
+            )
         messages: Messages = [
             {"role": "system", "content": "\n\n".join(system_parts)},
             {"role": "user", "content": "\n\n".join(user_parts)},

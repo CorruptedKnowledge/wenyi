@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...agents.cjk_seed import CjkGlossarySeeder, mine_cjk_candidates
 from ...events import ProgressFn
+from ...i18n.genres import DEFAULT_GENRE
 from ...i18n.languages import glossary_context_dependent_sources
 from ...llm.routing import inference_snapshot
 from ...models.glossary import TYPE_NAVIGATION, GlossaryTerm
@@ -181,7 +182,8 @@ class CjkGlossarySeedService:
         user_terms: Sequence[GlossaryTerm],
     ) -> str:
         manifest = store.load_manifest()
-        payload = {
+        genre = self._runtime.config.language_policy("translation").context.genre
+        payload: dict[str, Any] = {
             "v": _SEED_SCHEMA_VERSION,
             "source_sha256": manifest.get("source_sha256", ""),
             "src": self._runtime.config.source_lang,
@@ -194,6 +196,8 @@ class CjkGlossarySeedService:
                 (t.source, t.target, t.type, t.gender, tuple(t.aliases)) for t in user_terms
             ],
         }
+        if genre != DEFAULT_GENRE:
+            payload["genre"] = genre
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
