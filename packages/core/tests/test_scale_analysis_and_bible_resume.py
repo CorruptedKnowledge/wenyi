@@ -613,3 +613,95 @@ def test_bible_records_usage_before_the_final_artifact(tmp_path):
         assert order[final - 1] == "usage"
     finally:
         store.close()
+
+
+def _seed_with_style(service, store, style):
+    return service.ensure_seeded(
+        store,
+        digests=["白石 and 国主 appear."],
+        source_corpus=_BIBLE_CORPUS,
+        book_synopsis="Syn",
+        style=style,
+        repeated_quotes=_BIBLE_QUOTES,
+    )
+
+
+def test_checkpoint_for_other_inputs_never_replays_a_finished_publication(tmp_path):
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        _seed_with_style(BibleSeedService(_bible_agent(), _bible_cfg()), store, "S")
+        store.delete_term("白石")
+        # A run with other inputs stops during its voice pass, leaving its own checkpoint.
+        agent = _bible_agent()
+        agent.compile_voice_exemplars.side_effect = RuntimeError("simulated voice interrupt")
+        with pytest.raises(RuntimeError, match="simulated"):
+            _seed_with_style(BibleSeedService(agent, _bible_cfg()), store, "S2")
+        checkpoint = store.read_artifact("glossary_bible.checkpoint.json")
+        assert checkpoint is not None
+        # Back on the original inputs, the finished Bible is reused as it was.
+        _seed_with_style(BibleSeedService(_bible_agent(), _bible_cfg()), store, "S")
+        assert store.get_term("白石") is None
+        assert store.read_artifact("glossary_bible.checkpoint.json") == checkpoint
+    finally:
+        store.close()
+
+
+def test_publication_matches_entries_by_normalized_key(tmp_path):
+    from wenyi_core.models.glossary import GlossaryTerm
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        store.upsert_term(GlossaryTerm("Ａｌｉｃｅ", "Alice", type="person"))
+        BibleSeedService._publish_seeds(
+            store, [GlossaryTerm("Alice", "Alice", type="person", first_chapter=0)]
+        )
+        assert store.get_term("Alice") is None
+    finally:
+        store.close()
+
+
+def test_prompts_match_navigation_stubs_by_exact_source(tmp_path):
+    from wenyi_core.agents.book_bible import BibleResult
+    from wenyi_core.models.glossary import TYPE_NAVIGATION, GlossaryTerm
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        store.upsert_term(GlossaryTerm("Ａｌｉｃｅ", "Alyce", type=TYPE_NAVIGATION))
+        agent = _bible_agent()
+        agent.compile_bible.side_effect = lambda *a, **k: BibleResult(
+            terms=(GlossaryTerm("Alice", "Alice", type="person", first_chapter=0),),
+            variants_by_source={},
+            candidate_count=1,
+            divergent_count=0,
+        )
+        _seed(BibleSeedService(agent, _bible_cfg()), store)
+        # Publication inserts "Alice" beside the differently written stub, so prompts see it.
+        assert store.get_term("Alice") is not None
+        prompt_terms = agent.pretranslate_quotes.call_args.kwargs["terms"]
+        assert any(t.source == "Alice" for t in prompt_terms)
+    finally:
+        store.close()
+
+
+def test_saved_quotes_are_rerendered_when_the_prompt_glossary_changed(tmp_path):
+    from wenyi_core.models.glossary import TYPE_NAVIGATION, GlossaryTerm
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        store.upsert_term(GlossaryTerm("白石", "The White Rock", type=TYPE_NAVIGATION))
+        agent = _interrupt_voice(store)
+        assert agent.pretranslate_quotes.call_count == 1
+        # The navigation target now agrees with the seed, so prompts will see the seed.
+        store.delete_term("白石")
+        store.upsert_term(GlossaryTerm("白石", "White Stone", type=TYPE_NAVIGATION))
+        resumed = _bible_agent()
+        _seed(BibleSeedService(resumed, _bible_cfg()), store)
+        resumed.compile_bible.assert_not_called()
+        assert resumed.pretranslate_quotes.call_count == 1
+    finally:
+        store.close()

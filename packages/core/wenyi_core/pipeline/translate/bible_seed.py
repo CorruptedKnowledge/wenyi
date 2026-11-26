@@ -220,7 +220,9 @@ class BibleSeedService:
             # A leftover checkpoint means a run stopped after the artifact but before publication
             # finished; complete it once. Otherwise publication is done, and later glossary edits
             # (a deleted seed, a resolved conflict) belong to the user.
-            if store.read_artifact(_CHECKPOINT_ARTIFACT) is not None:
+            # A checkpoint for other inputs holds paid work a later run may still reuse.
+            leftover = store.read_artifact(_CHECKPOINT_ARTIFACT)
+            if isinstance(leftover, dict) and leftover.get("fingerprint") == fp:
                 self._publish_seeds(store, _seed_terms_from_record(saved))
                 store.delete_artifact(_CHECKPOINT_ARTIFACT)
             store.log_event(
@@ -260,20 +262,26 @@ class BibleSeedService:
         pending = set(inserted)
         seeds = [t for t in result.terms if t.source in pending]
         present = {normalize_match_text(t.source).strip() for t in existing_terms}
+        # Navigation stubs are matched by exact source, as ``upsert_term`` matches them.
         nav_targets = {
-            normalize_match_text(t.source).strip(): t.target.strip()
-            for t in store.all_terms()
-            if t.type == TYPE_NAVIGATION
+            t.source: t.target.strip() for t in store.all_terms() if t.type == TYPE_NAVIGATION
         }
         all_terms = list(existing_terms) + [
             t
             for t in seeds
-            if (key := normalize_match_text(t.source).strip()) not in present
-            and nav_targets.get(key, t.target.strip()) == t.target.strip()
+            if normalize_match_text(t.source).strip() not in present
+            and nav_targets.get(t.source, t.target.strip()) == t.target.strip()
         ]
+        # Saved quote renderings are reused only for the same prompt glossary: a navigation edit
+        # leaves the fingerprint unchanged but can change which seeds the prompts see.
+        terms_key = hashlib.sha256(
+            json.dumps(
+                sorted((t.source, t.target, t.type) for t in all_terms), ensure_ascii=False
+            ).encode("utf-8")
+        ).hexdigest()
         quote_targets: dict[str, str] = {}
         saved_quotes = checkpoint.get("quote_targets") if isinstance(checkpoint, dict) else None
-        if isinstance(saved_quotes, dict):
+        if isinstance(saved_quotes, dict) and checkpoint.get("quote_terms_key") == terms_key:
             quote_targets = {
                 k: v
                 for k, v in saved_quotes.items()
@@ -289,7 +297,11 @@ class BibleSeedService:
             if checkpoint_usage is not None:
                 checkpoint_usage()
             # Keep the paid quote renderings if the voice pass is interrupted next.
-            checkpoint = {**checkpoint, "quote_targets": quote_targets}
+            checkpoint = {
+                **checkpoint,
+                "quote_targets": quote_targets,
+                "quote_terms_key": terms_key,
+            }
             store.write_artifact(_CHECKPOINT_ARTIFACT, checkpoint)
 
         voice_excerpts = select_voice_excerpts(
