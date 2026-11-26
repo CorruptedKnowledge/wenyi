@@ -23,7 +23,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..glossary.prompt_scope import split_glossary_tiers
+from ..glossary.prompt_scope import split_trimmed_glossary_tiers
 from ..llm.json_parser import JsonParseError
 from ..llm.preflight import fit_prompt_to_context_window
 from ..llm.retrying import TruncatedResponseError, is_resumable_provider_interrupt
@@ -183,9 +183,11 @@ class SparseSemanticEditor(Agent):
         match_text = "\n".join(part for part in (*src_list, next_source) if part)
         prefix_budget = self.config.pipeline.glossary_prompt_tokens
 
+        full_glossary = list(glossary_terms)
+
         def _render(terms_for_prompt: list[GlossaryTerm]) -> tuple[str, str]:
-            entity_terms, extra_terms = split_glossary_tiers(
-                terms_for_prompt, match_text, prefix_budget=prefix_budget
+            entity_terms, extra_terms = split_trimmed_glossary_tiers(
+                full_glossary, terms_for_prompt, match_text, prefix_budget=prefix_budget
             )
             sys_parts = [base_system]
             if style_block:

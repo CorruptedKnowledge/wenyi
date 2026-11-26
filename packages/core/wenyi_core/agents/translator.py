@@ -13,7 +13,7 @@ import logging
 import re
 
 from ..alignment.objects import marked_sources
-from ..glossary.prompt_scope import split_glossary_tiers
+from ..glossary.prompt_scope import split_trimmed_glossary_tiers
 from ..glossary.store import GlossaryStore
 from ..i18n import genres
 from ..llm.json_parser import JsonParseError, UnsafeJsonRepairError, parse_json_result
@@ -236,8 +236,8 @@ class Translator(Agent):
             # system message so consecutive batches share a byte-identical KV-cacheable prefix.
             # Per-batch overflow entities, matched navigation titles, local glossary notes,
             # and protected-object guidance stay outside that shared prefix.
-            entity_terms, batch_extra_terms = split_glossary_tiers(
-                terms_for_prompt, match_text, prefix_budget=prefix_budget
+            entity_terms, batch_extra_terms = split_trimmed_glossary_tiers(
+                glossary_terms, terms_for_prompt, match_text, prefix_budget=prefix_budget
             )
             overflow_terms = [t for t in batch_extra_terms if t.type != TYPE_NAVIGATION]
             nav_terms = [t for t in batch_extra_terms if t.type == TYPE_NAVIGATION]

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 SEED_ARTIFACT_KEY = "glossary/cjk_seed.json"
 _SEED_SCHEMA_VERSION = 1
+_MAX_INCOMPLETE_SEED_ATTEMPTS = 2
 
 
 class CjkGlossarySeedService:
@@ -51,6 +52,7 @@ class CjkGlossarySeedService:
         self._seeder.language_policy = self._runtime.config.language_policy("translation")
 
         existing_all = store.all_terms()
+        existing_all_sources = {t.source for t in existing_all}
         # Only user-owned non-navigation entries (first_chapter is None) define the seed prefix
         # and cache fingerprint; EPUB chapter titles stay scoped to matching batches.
         user_terms = [
@@ -59,21 +61,45 @@ class CjkGlossarySeedService:
         fingerprint = self._fingerprint(store, digests, book_synopsis, style, user_terms)
 
         cached = store.read_artifact(SEED_ARTIFACT_KEY)
-        if (
+        # Preserve the history of previously published seed sources across fingerprint changes
+        # so terms explicitly deleted by the user are never resurrected after adding another term.
+        previously_published: set[str] = set()
+        if isinstance(cached, dict) and cached.get("version") == _SEED_SCHEMA_VERSION:
+            raw_hist = cached.get("published_sources")
+            if isinstance(raw_hist, list):
+                previously_published = {str(s) for s in raw_hist if isinstance(s, str)}
+            elif cached.get("published") is True and isinstance(cached.get("terms"), list):
+                previously_published = {
+                    str(item["source"])
+                    for item in cached["terms"]
+                    if isinstance(item, dict) and isinstance(item.get("source"), str)
+                }
+        user_deleted = previously_published - existing_all_sources
+
+        same_fingerprint = (
             isinstance(cached, dict)
             and cached.get("version") == _SEED_SCHEMA_VERSION
             and cached.get("fingerprint") == fingerprint
             and isinstance(cached.get("terms"), list)
-        ):
-            # Once published, never re-insert on subsequent runs so user-deleted seed terms
-            # remain deleted instead of resurrecting on resume.
+        )
+        prior_attempts = (
+            int(cached.get("attempts", 0)) if same_fingerprint and isinstance(cached, dict) else 0
+        )
+        if same_fingerprint and isinstance(cached, dict):
+            # Once published (either complete or finalized after max retries), never re-insert
+            # on subsequent runs so user-deleted seed terms stay deleted.
             if cached.get("published") is True:
                 return 0
-            terms = [self._deserialize_term(item) for item in cached["terms"]]
-            terms = [t for t in terms if t is not None]
-            published = self._publish_idempotent(store, terms)
-            store.write_artifact(SEED_ARTIFACT_KEY, {**cached, "published": True})
-            return published
+            if cached.get("complete", True) is True:
+                terms = [self._deserialize_term(item) for item in cached["terms"]]
+                terms = [t for t in terms if t is not None and t.source not in user_deleted]
+                published = self._publish_idempotent(store, terms)
+                all_published = sorted(previously_published | {t.source for t in terms})
+                store.write_artifact(
+                    SEED_ARTIFACT_KEY,
+                    {**cached, "published": True, "published_sources": all_published},
+                )
+                return published
 
         if progress:
             progress(0, 1, "progress.stage.seedingGlossary")
@@ -82,7 +108,7 @@ class CjkGlossarySeedService:
         candidates = mine_cjk_candidates(
             digests,
             source_corpus,
-            existing_sources={t.source for t in user_terms},
+            existing_sources={t.source for t in user_terms} | user_deleted,
             context_dependent_sources=context_sources,
         )
         result = self._seeder.seed_result(
@@ -95,23 +121,45 @@ class CjkGlossarySeedService:
         if checkpoint_usage is not None:
             checkpoint_usage()
 
-        seeded = result.terms
-        if result.complete:
+        seeded = [t for t in result.terms if t.source not in user_deleted]
+        attempts = prior_attempts + 1
+        finalized = result.complete or attempts >= _MAX_INCOMPLETE_SEED_ATTEMPTS
+        if finalized:
             # Persist the paid seed artifact before publishing into SQLite so an interrupt
             # during publication resumes with zero extra LLM calls, then mark it published.
             artifact = {
                 "version": _SEED_SCHEMA_VERSION,
                 "fingerprint": fingerprint,
+                "complete": result.complete,
+                "attempts": attempts,
                 "terms": [self._serialize_term(t) for t in seeded],
                 "published": False,
+                "published_sources": sorted(previously_published),
             }
             store.write_artifact(SEED_ARTIFACT_KEY, artifact)
             published = self._publish_idempotent(store, seeded)
-            store.write_artifact(SEED_ARTIFACT_KEY, {**artifact, "published": True})
+            all_published = sorted(previously_published | {t.source for t in seeded})
+            store.write_artifact(
+                SEED_ARTIFACT_KEY,
+                {**artifact, "published": True, "published_sources": all_published},
+            )
         else:
-            # Partial chunk failures still publish valid terms but skip caching so the next
-            # resume retries the missing chunks instead of freezing an empty/partial seed.
+            # Partial chunk failure on first attempt: publish valid terms and record the
+            # attempt count so one retry runs without re-paying forever on deterministic 400s.
             published = self._publish_idempotent(store, seeded)
+            all_published = sorted(previously_published | {t.source for t in seeded})
+            store.write_artifact(
+                SEED_ARTIFACT_KEY,
+                {
+                    "version": _SEED_SCHEMA_VERSION,
+                    "fingerprint": fingerprint,
+                    "complete": False,
+                    "attempts": attempts,
+                    "terms": [self._serialize_term(t) for t in seeded],
+                    "published": False,
+                    "published_sources": all_published,
+                },
+            )
         store.log_event(
             "cjk_glossary_seeded",
             candidates=len(candidates),

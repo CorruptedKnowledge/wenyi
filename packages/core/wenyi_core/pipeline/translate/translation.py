@@ -29,13 +29,18 @@ from .babeldoc_context import BabeldocContext
 from .context import following_chapter_source, recent_chapter_context
 from .extraction_queue import ExtractionQueue
 from .glossary_notes import GlossaryNotes
-from .parallel_chapters import ParallelChapterRunner, publish_chapter_status
+from .parallel_chapters import (
+    ParallelChapterRunner,
+    pending_or_unpolished_chapters,
+    publish_chapter_status,
+)
 from .polish_queue import PolishOutcome, PolishQueue
 from .post_normalize import repair_escaped_newlines
 from .precision import PrecisionBatchExecutor, save_precision_batch
 from .seed_service import CjkGlossarySeedService
 from .title_translation import TitleTranslationService
 from .translation_batch import (
+    POLISH_ATTEMPTS,
     POLISH_FAILED,
     POLISH_PENDING,
     BatchDraft,
@@ -43,6 +48,7 @@ from .translation_batch import (
     PolishJob,
     TranslationBatchExecutor,
     keep_nonempty_drafts,
+    mark_polish_failure,
     resume_batches,
 )
 
@@ -98,20 +104,11 @@ class TranslationService:
         if only_chapter is not None:
             targets = progress_chapters = [only_chapter]
         else:
-            targets = store.pending_chapters()
-            if pipeline.polish and pipeline.translation_mode == "standard":
-                unpolished = {
-                    row["index"]
-                    for row in manifest.get("chapters", [])
-                    if row.get("unpolished") and row["index"] not in targets
-                }
-                if unpolished:
-                    needed = set(targets) | unpolished
-                    targets = [
-                        row["index"]
-                        for row in manifest.get("chapters", [])
-                        if row["index"] in needed
-                    ]
+            targets = pending_or_unpolished_chapters(
+                store,
+                manifest,
+                include_unpolished=pipeline.polish and pipeline.translation_mode == "standard",
+            )
             progress_chapters = [chapter["index"] for chapter in manifest.get("chapters", [])]
 
         total, done = self.progress_counts(store, progress_chapters)
@@ -322,6 +319,11 @@ class TranslationService:
         with store.state_lock():
             chapter = store.load_chapter(ci)
             self._precision.recover_publications(store, chapter)
+            manifest_row = next(
+                (r for r in store.load_manifest().get("chapters", []) if r.get("index") == ci),
+                {},
+            )
+            reopened_done = manifest_row.get("status") == STATUS_DONE
         text_segs = chapter.text_segments
         if not text_segs:
             store.set_chapter_status(ci, STATUS_DONE)
@@ -513,9 +515,12 @@ class TranslationService:
                     )
                     segment.meta.pop(POLISH_PENDING, None)
                     if result.polish_failed and pipeline.polish:
-                        segment.meta[POLISH_FAILED] = True
+                        mark_polish_failure(
+                            segment, interrupted=result.polish_interrupted is not None
+                        )
                     else:
                         segment.meta.pop(POLISH_FAILED, None)
+                        segment.meta.pop(POLISH_ATTEMPTS, None)
                 store.save_chapter(chapter)
                 if result.polish_empty_reverted:
                     store.log_event(
@@ -602,6 +607,11 @@ class TranslationService:
             else:
                 self._publish_chapter(store, ci)
 
+        if reopened_done:
+            # Chapters reopened solely to recover polish already completed chapter extraction.
+            publish_when_polished()
+            return done
+
         src_text = "\n".join(s.source for s in text_segs)
         tgt_text = "\n".join(
             (s.target_before_polish if self._polish_queue is not None else None) or s.target or ""
@@ -687,7 +697,7 @@ class TranslationService:
             )
             if polished_targets is None:
                 if eligible:
-                    segment.meta[POLISH_FAILED] = True
+                    mark_polish_failure(segment, interrupted=False)
                 continue
             if not eligible:
                 continue
@@ -699,9 +709,11 @@ class TranslationService:
             )
             if norm_before is not None and segment.target != norm_before:
                 segment.meta.pop(POLISH_FAILED, None)
+                segment.meta.pop(POLISH_ATTEMPTS, None)
                 continue
             segment.target = repair_escaped_newlines(segment.source, polished_targets[index])
             segment.meta.pop(POLISH_FAILED, None)
+            segment.meta.pop(POLISH_ATTEMPTS, None)
             applied = True
 
         store.save_chapter(chapter)

@@ -82,6 +82,34 @@ def split_glossary_tiers(
     return prefix, [*matched_overflow, *matched_nav]
 
 
+def split_trimmed_glossary_tiers(
+    full_terms: list[GlossaryTerm],
+    selected_terms: list[GlossaryTerm],
+    text: str,
+    *,
+    prefix_budget: int = 0,
+) -> tuple[list[GlossaryTerm], list[GlossaryTerm]]:
+    """Split ``selected_terms`` into ``(system_prefix, user_overflow)`` without promoting
+    per-batch overflow terms into the shared system prefix when preflight trims ``full_terms``.
+    """
+    if len(selected_terms) >= len(full_terms):
+        return split_glossary_tiers(selected_terms, text, prefix_budget=prefix_budget)
+    orig_prefix, _ = split_glossary_tiers(full_terms, text, prefix_budget=prefix_budget)
+    selected_ids = {id(term) for term in selected_terms}
+    stable_prefix: list[GlossaryTerm] = []
+    prefix_ids: set[int] = set()
+    for term in orig_prefix:
+        if id(term) not in selected_ids:
+            break
+        stable_prefix.append(term)
+        prefix_ids.add(id(term))
+    overflow_pool = [term for term in selected_terms if id(term) not in prefix_ids]
+    matched_overflow = (
+        GlossaryStore.terms_in(overflow_pool, text) if (overflow_pool and text) else []
+    )
+    return stable_prefix, matched_overflow
+
+
 def prompt_terms(
     terms: list[GlossaryTerm],
     text: str,

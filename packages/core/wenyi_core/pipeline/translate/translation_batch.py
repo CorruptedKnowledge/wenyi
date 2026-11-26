@@ -18,6 +18,22 @@ from ...models.glossary import GlossaryTerm
 
 POLISH_PENDING = "polish_pending"
 POLISH_FAILED = "polish_failed"
+POLISH_ATTEMPTS = "polish_attempts"
+MAX_POLISH_ATTEMPTS = 2
+
+
+def mark_polish_failure(segment: Segment, *, interrupted: bool = False) -> None:
+    """Record a polish failure; cap deterministic retries while always retrying outages."""
+    if interrupted:
+        segment.meta[POLISH_FAILED] = True
+        return
+    attempts = int(segment.meta.get(POLISH_ATTEMPTS, 0)) + 1
+    if attempts < MAX_POLISH_ATTEMPTS:
+        segment.meta[POLISH_ATTEMPTS] = attempts
+        segment.meta[POLISH_FAILED] = True
+    else:
+        segment.meta.pop(POLISH_FAILED, None)
+        segment.meta.pop(POLISH_ATTEMPTS, None)
 
 
 @dataclass(frozen=True)

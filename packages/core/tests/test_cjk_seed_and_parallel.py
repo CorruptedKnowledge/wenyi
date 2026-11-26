@@ -9,16 +9,25 @@ import threading
 import time
 
 import pytest
-from wenyi_core.agents.cjk_seed import CjkGlossarySeeder, SeedCandidate, mine_cjk_candidates
+from wenyi_core.agents.cjk_seed import (
+    CjkGlossarySeeder,
+    SeedCandidate,
+    _count_candidates_in_corpus,
+    mine_cjk_candidates,
+)
+from wenyi_core.agents.translator import Translator
 from wenyi_core.config import Config
 from wenyi_core.glossary.prompt_scope import (
     estimate_term_tokens,
     fit_terms_to_budget,
     split_glossary_tiers,
+    split_trimmed_glossary_tiers,
 )
+from wenyi_core.llm.limits import RequestCancelled
 from wenyi_core.llm.retrying import ProviderRequestError
 from wenyi_core.models.glossary import TYPE_NAVIGATION, GlossaryTerm
 from wenyi_core.pipeline.orchestrator import Orchestrator
+from wenyi_core.pipeline.translate.parallel_chapters import ParallelChapterRunner
 from wenyi_core.pipeline.translate.seed_service import SEED_ARTIFACT_KEY
 from wenyi_core.pipeline.translate.translation_batch import POLISH_FAILED
 from wenyi_core.storage.run_store import STATUS_DONE
@@ -398,11 +407,15 @@ def test_seed_service_excludes_nav_respects_user_deletions_and_does_not_cache_fa
         GlossaryTerm(source="第一章 启程", target="Chapter 1: Departure", type=TYPE_NAVIGATION)
     )
 
-    # First run: malformed chunk fails -> must NOT write SEED_ARTIFACT_KEY.
+    # First run: malformed chunk fails -> records incomplete attempt (published=False) so retry runs.
     orch.run(str(src_path))
     assert len(seed_systems) == 1
     assert "第一章 启程" not in seed_systems[0]
-    assert store.read_artifact(SEED_ARTIFACT_KEY) is None
+    first_cached = store.read_artifact(SEED_ARTIFACT_KEY)
+    assert isinstance(first_cached, dict)
+    assert first_cached.get("complete") is False
+    assert first_cached.get("published") is False
+    assert first_cached.get("attempts") == 1
 
     # Mark chapters pending again and fix handler -> seed retries and writes published artifact.
     for ci in (0, 1):
@@ -421,6 +434,16 @@ def test_seed_service_excludes_nav_respects_user_deletions_and_does_not_cache_fa
     orch.run(str(src_path))
     assert len(seed_systems) == 2  # Zero extra LLM calls.
     assert store.get_term("林尘") is None
+
+    # Adding an unrelated custom term changes the seed fingerprint, yet the deleted seed term
+    # must stay deleted across the fingerprint change (tracked via published_sources).
+    store.upsert_term(GlossaryTerm(source="天城", target="Sky City", type="place"))
+    for ci in (0, 1):
+        store.set_chapter_status(ci, "pending")
+    orch.run(str(src_path))
+    assert len(seed_systems) == 3
+    assert store.get_term("林尘") is None
+    assert store.get_term("天城") is not None
 
 
 def test_cjk_seeder_propagates_4xx_errors_copies_contextvars_and_runs_preflight():
@@ -504,3 +527,244 @@ def test_fit_terms_to_budget_preserves_leading_prefix_across_different_batches()
     assert [t.source for t in batch_b[:2]] == ["林尘", "青云宗"]
     assert batch_a[2].source == "黑风谷"
     assert batch_b[2].source == "血魔殿"
+
+
+def test_parallel_cancellation_during_alignment_still_persists_all_wave_batches(tmp_path):
+    book = "第一章 一\n\n第一段。\n\n第二段。\n\n第二章 二\n\n第三段。\n\n第四段。\n"
+    src_path = tmp_path / "align_cancel.txt"
+    src_path.write_text(book, encoding="utf-8")
+
+    cfg = fake_pipeline_config(os.path.join(tmp_path, "state"))
+    cfg.source_lang = "zh"
+    cfg.target_lang = "en"
+    cfg.pipeline.review = False
+    cfg.pipeline.polish = False
+    cfg.pipeline.book_understanding = False
+    cfg.pipeline.chapter_concurrency = 2
+    cfg.segment.max_tokens_per_batch = 1
+
+    orch = Orchestrator(cfg, client=MeteredFakeClient(handler=routing_handler))
+    store = require_file_storage(orch.prepare(str(src_path)))
+
+    align_calls = 0
+
+    def cancel_on_first_align(st, ch, segs, start, count):
+        nonlocal align_calls
+        align_calls += 1
+        raise RequestCancelled("cancelled during alignment")
+
+    runner = ParallelChapterRunner(
+        orch._translation._batches,
+        chapter_batches_fn=orch._translation._chapter_batches,
+        align_batch_fn=cancel_on_first_align,
+        progress_label_fn=orch._translation.chapter_progress_label,
+        flush_usage_fn=lambda st, scope: None,
+    )
+    with pytest.raises(RequestCancelled):
+        runner.run(
+            [0, 1],
+            store,
+            frozen_terms=[],
+            style="",
+            book_synopsis="",
+            annotation_context_registry=None,
+            chapter_concurrency=2,
+            rolling_context_tokens=200,
+            polish=False,
+            polish_mode="full",
+            progress=None,
+            done=0,
+            total=6,
+        )
+    assert align_calls == 1
+    # Every segment of the chapter whose alignment triggered cancellation was already saved!
+    saved_ch0 = [s.target for s in store.load_chapter(0).text_segments if s.target is not None]
+    saved_ch1 = [s.target for s in store.load_chapter(1).text_segments if s.target is not None]
+    assert len(saved_ch0) == 3 or len(saved_ch1) == 3
+
+
+def test_parallel_repolish_never_feeds_rejected_polish_into_subsequent_batch_context(tmp_path):
+    book = "第一章 一\n\n第一段。\n\n第二段。\n\n第二章 二\n\n第三段。\n\n第四段。\n"
+    src_path = tmp_path / "repolish_ctx.txt"
+    src_path.write_text(book, encoding="utf-8")
+
+    cfg = fake_pipeline_config(os.path.join(tmp_path, "state"))
+    cfg.source_lang = "zh"
+    cfg.target_lang = "en"
+    cfg.pipeline.review = False
+    cfg.pipeline.polish = True
+    cfg.pipeline.polish_mode = "sparse"
+    cfg.pipeline.book_understanding = False
+    cfg.pipeline.chapter_concurrency = 2
+    cfg.segment.max_tokens_per_batch = 1
+
+    captured_translate_users: list[str] = []
+
+    def handler(messages, tier, json_mode):
+        system = messages[0]["content"]
+        if "compile a consistent glossary" in system:
+            return json.dumps({"terms": []})
+        if tier == "polish.body":
+            return json.dumps(
+                {"patches": [{"index": 0, "text": "Rejected polished draft.", "reason": "style"}]}
+            )
+        if tier == "translation.body":
+            captured_translate_users.append(messages[-1]["content"])
+            return routing_handler(messages, tier, json_mode)
+        return routing_handler(messages, tier, json_mode)
+
+    orch = Orchestrator(cfg, client=MeteredFakeClient(handler=handler))
+    store = require_file_storage(orch.prepare(str(src_path)))
+
+    # Mark first two segments of each chapter as already translated with a manual author edit
+    # that differs from target_before_polish, while still carrying POLISH_FAILED.
+    for ci in (0, 1):
+        ch = store.load_chapter(ci)
+        for seg in ch.text_segments[:2]:
+            seg.target = "Author edit"
+            seg.target_before_polish = "Original draft"
+            seg.meta[POLISH_FAILED] = True
+        store.save_chapter(ch)
+
+    orch.run(str(src_path))
+    assert captured_translate_users
+    assert all("Author edit" in user for user in captured_translate_users)
+    assert all("Rejected polished draft." not in user for user in captured_translate_users)
+
+
+def test_cjk_seeder_absorbs_400_content_filter_validates_rows_and_keeps_count_parity(tmp_path):
+    cfg = Config.from_dict(
+        {"language": {"source": "zh", "target": "en"}, "llm": {"preset": "fake"}}
+    )
+    cand = [SeedCandidate("林尘", 5, "林尘出场")]
+
+    # 1. Explicit {"terms": []} is complete=True; malformed rows are complete=False.
+    res_empty = CjkGlossarySeeder(
+        FakeClient(handler=lambda *a: json.dumps({"terms": []})), cfg
+    ).seed_result(cand, max_workers=1)
+    assert res_empty.complete is True and res_empty.terms == []
+
+    for bad_payload in (
+        {"terms": [None]},
+        {"terms": [{"source": "林尘", "target": {"nested": "bad"}}]},
+        {"terms": [{"source": "林尘", "target": "Lin Chen", "aliases": [123]}]},
+    ):
+        res_bad = CjkGlossarySeeder(
+            FakeClient(handler=lambda *a, p=bad_payload: json.dumps(p)), cfg
+        ).seed_result(cand, max_workers=1)
+        assert res_bad.complete is False
+
+    # 2. HTTP 400 (e.g. DeepSeek "Content Exists Risk") is absorbed as incomplete instead of crashing.
+    def fail_400(messages, tier, json_mode):
+        raise ProviderRequestError(
+            provider="deepseek",
+            operation="glossary.extract",
+            error_type="http_error",
+            status_code=400,
+            reason=None,
+            resumable=False,
+        )
+
+    res_400 = CjkGlossarySeeder(FakeClient(handler=fail_400), cfg).seed_result(cand, max_workers=1)
+    assert res_400.complete is False and res_400.terms == []
+
+    # 3. Incomplete seed retries are capped at 2 attempts on deterministic 400 so runs stop re-paying.
+    book = "第一章 一\n\n林尘离开青云宗。\n\n第二章 二\n\n林尘回到青云宗。\n"
+    src_path = tmp_path / "cap_seed.txt"
+    src_path.write_text(book, encoding="utf-8")
+    run_cfg = fake_pipeline_config(os.path.join(tmp_path, "state"))
+    run_cfg.source_lang = "zh"
+    run_cfg.target_lang = "en"
+    run_cfg.pipeline.review = False
+    run_cfg.pipeline.polish = False
+    run_cfg.pipeline.book_understanding = False
+    run_cfg.pipeline.chapter_concurrency = 2
+
+    seed_attempts = 0
+
+    def always_400_seed(messages, tier, json_mode):
+        nonlocal seed_attempts
+        if "compile a consistent glossary" in messages[0]["content"]:
+            seed_attempts += 1
+            return fail_400(messages, tier, json_mode)
+        return routing_handler(messages, tier, json_mode)
+
+    orch = Orchestrator(run_cfg, client=MeteredFakeClient(handler=always_400_seed))
+    store = require_file_storage(orch.prepare(str(src_path)))
+    for _ in range(3):
+        for ci in (0, 1):
+            store.set_chapter_status(ci, "pending")
+        orch.run(str(src_path))
+    assert seed_attempts == 2  # Capped after 2 deterministic failures.
+
+    # 4. Counting parity across the 250-candidate threshold (strictly non-overlapping).
+    small = _count_candidates_in_corpus("哈哈哈", {"哈哈"})
+    large_cands = {"哈哈"} | {f"词{i:03d}" for i in range(260)}
+    large = _count_candidates_in_corpus("哈哈哈", large_cands)
+    assert small == {}
+    assert large == {}
+
+
+def test_preflight_trimming_never_promotes_per_batch_overflow_into_system_glossary():
+    terms = [
+        GlossaryTerm(source="林尘", target="Lin Chen", type="person"),
+        GlossaryTerm(
+            source="太上忘情九霄剑宗",
+            target="Supreme Emotionless Nine Heavens Immortal Sword Sect",
+            type="organization",
+        ),
+        GlossaryTerm(source="黑风谷", target="Black Wind Valley", type="place"),
+        GlossaryTerm(source="血魔殿", target="Blood Demon Hall", type="organization"),
+    ]
+    # Budget fits leading term + 1 matched overflow term, but NOT the oversized 2nd term.
+    budget = estimate_term_tokens(terms[0]) + max(
+        estimate_term_tokens(terms[2]), estimate_term_tokens(terms[3])
+    )
+    assert estimate_term_tokens(terms[0]) + estimate_term_tokens(terms[1]) > budget
+    sel_a = fit_terms_to_budget(terms, "黑风谷", max_tokens=budget)
+    sel_b = fit_terms_to_budget(terms, "血魔殿", max_tokens=budget)
+    sys_a, usr_a = split_trimmed_glossary_tiers(terms, sel_a, "黑风谷", prefix_budget=0)
+    sys_b, usr_b = split_trimmed_glossary_tiers(terms, sel_b, "血魔殿", prefix_budget=0)
+    assert [t.source for t in sys_a] == ["林尘"]
+    assert [t.source for t in sys_b] == ["林尘"]
+    assert [t.source for t in usr_a] == ["黑风谷"]
+    assert [t.source for t in usr_b] == ["血魔殿"]
+
+    # End-to-end Translator preflight check: system prompt stays byte-identical across batches.
+    observed_systems: list[str] = []
+    observed_users: list[str] = []
+
+    def handler(messages, tier, json_mode):
+        observed_systems.append(messages[0]["content"])
+        observed_users.append(messages[1]["content"])
+        return json.dumps({"translations": ["Translated."]})
+
+    big_glossary = [
+        GlossaryTerm(source="林尘", target="Lin Chen", type="person"),
+        *[
+            GlossaryTerm(source=f"填充词{i:03d}", target=f"Padding Term {i:03d}", type="term")
+            for i in range(60)
+        ],
+        GlossaryTerm(source="黑风谷", target="Black Wind Valley", type="place"),
+        GlossaryTerm(source="血魔殿", target="Blood Demon Hall", type="organization"),
+    ]
+    cfg = Config.from_dict(
+        {
+            "language": {"source": "zh", "target": "en"},
+            "llm": {
+                "preset": "fake",
+                "models": {"fake/tight": {"context_window": 1650, "max_output_tokens": 100}},
+                "routes": {"translation.body": {"model": "fake/tight"}},
+            },
+            "pipeline": {"glossary_prompt_tokens": 0},
+        }
+    )
+    translator = Translator(FakeClient(handler=handler), cfg)
+    translator.translate_batch(["黑风谷的夜晚。"], glossary_terms=big_glossary)
+    translator.translate_batch(["血魔殿的夜晚。"], glossary_terms=big_glossary)
+    assert len(observed_systems) == 2
+    assert observed_systems[0] == observed_systems[1]
+    assert "黑风谷" not in observed_systems[0]
+    assert "血魔殿" not in observed_systems[1]
+    assert "黑风谷" in observed_users[0]
+    assert "血魔殿" in observed_users[1]

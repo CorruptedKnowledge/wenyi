@@ -222,3 +222,51 @@ def test_serial_resume_recovers_polish_after_escaped_newline_repair_and_done_unp
     assert ch_after.text_segments[0].target == "Polished Line 1\nLine 2"
     assert ch_after.text_segments[0].meta.get(POLISH_FAILED) is None
     assert not store.load_manifest()["chapters"][0].get("unpolished")
+
+
+def test_serial_reopened_unpolished_chapter_skips_reextraction_and_caps_deterministic_retries(
+    tmp_path,
+):
+    book = "第一章 启程\n\n第一段。\n"
+    src_path = tmp_path / "polish_cap.txt"
+    src_path.write_text(book, encoding="utf-8")
+
+    cfg = fake_pipeline_config(os.path.join(tmp_path, "state"))
+    cfg.source_lang = "zh"
+    cfg.target_lang = "en"
+    cfg.pipeline.review = False
+    cfg.pipeline.polish = True
+    cfg.pipeline.polish_mode = "sparse"
+    cfg.pipeline.book_understanding = False
+    cfg.pipeline.chapter_concurrency = 1
+    cfg.pipeline.polish_concurrency = 1
+
+    tier_counts: dict[str, int] = {}
+
+    def always_bad_polish(messages, tier, json_mode):
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+        if tier == "polish.body":
+            return "not valid json"
+        return routing_handler(messages, tier, json_mode)
+
+    orch = Orchestrator(cfg, client=MeteredFakeClient(handler=always_bad_polish))
+    store = require_file_storage(orch.prepare(str(src_path)))
+
+    # Run 1: initial translation + failed polish -> chapter marked unpolished.
+    orch.run(str(src_path))
+    assert store.load_manifest()["chapters"][0].get("unpolished") is True
+    extract_after_run1 = tier_counts.get("glossary.extract", 0)
+
+    # Run 2: reopened done chapter retries polish ONCE without repeating chapter glossary extract,
+    # hits the 2-attempt cap, and clears unpolished so Run 3 does zero model calls.
+    tier_counts.clear()
+    orch.run(str(src_path))
+    assert tier_counts.get("glossary.extract", 0) == 0
+    assert tier_counts.get("polish.body", 0) == 1
+    assert not store.load_manifest()["chapters"][0].get("unpolished")
+    assert extract_after_run1 >= 1
+
+    # Run 3: completely settled, 0 model calls.
+    tier_counts.clear()
+    orch.run(str(src_path))
+    assert tier_counts == {}

@@ -110,11 +110,14 @@ def _count_candidates_in_corpus(source_corpus: str, candidates: set[str]) -> dic
                 if freq >= 2:
                     counts[tok] = freq
     elif cjk_by_len:
-        # Single linear scan over contiguous CJK runs checks only active candidate lengths.
+        # Single linear scan over contiguous CJK runs checks only active candidate lengths,
+        # tracking each token's next eligible offset to match non-overlapping str.count().
         active_buckets = tuple(sorted(cjk_by_len.items()))
         hit_counts: Counter[str] = Counter()
+        next_valid: dict[str, int] = {}
         for run_match in _CJK_RUN_RE.finditer(source_corpus):
             run = run_match.group(0)
+            run_start = run_match.start()
             run_len = len(run)
             for size, bucket in active_buckets:
                 if run_len < size:
@@ -122,7 +125,10 @@ def _count_candidates_in_corpus(source_corpus: str, candidates: set[str]) -> dic
                 for start in range(0, run_len - size + 1):
                     sub = run[start : start + size]
                     if sub in bucket:
-                        hit_counts[sub] += 1
+                        pos = run_start + start
+                        if pos >= next_valid.get(sub, 0):
+                            hit_counts[sub] += 1
+                            next_valid[sub] = pos + size
         for tok, freq in hit_counts.items():
             if freq >= 2:
                 counts[tok] = freq
@@ -404,12 +410,16 @@ class CjkGlossarySeeder(Agent):
         except (JsonParseError, TruncatedResponseError, ValueError) as exc:
             _LOGGER.warning("CJK glossary seed chunk failed (%s); skipping chunk", exc)
             return [], False
-        except ProviderRequestError:
-            # Propagate both resumable outages and fatal 4xx config/auth errors.
-            raise
+        except ProviderRequestError as exc:
+            # Propagate resumable outages and fatal auth/model errors; absorb content-filter
+            # 400/422 errors so one noisy seed chunk never blocks translating the whole book.
+            if exc.resumable or exc.status_code in {401, 403, 404}:
+                raise
+            _LOGGER.warning("CJK glossary seed chunk provider error (%s); skipping chunk", exc)
+            return [], False
         except Exception as exc:
             status = error_status_code(exc)
-            if is_resumable_provider_interrupt(exc) or (status is not None and 400 <= status < 500):
+            if is_resumable_provider_interrupt(exc) or status in {401, 403, 404}:
                 raise
             _LOGGER.warning("CJK glossary seed chunk error (%s); skipping chunk", exc)
             return [], False
@@ -422,21 +432,35 @@ class CjkGlossarySeeder(Agent):
         out: list[GlossaryTerm] = []
         for item in raw_terms:
             if not isinstance(item, dict):
-                continue
-            source = str(item.get("source") or "").strip()
-            target = str(item.get("target") or "").strip()
+                return [], False
+            raw_source = item.get("source")
+            raw_target = item.get("target")
+            raw_type = item.get("type", "term")
+            raw_gender = item.get("gender", "")
+            raw_aliases = item.get("aliases", [])
+            if (
+                not isinstance(raw_source, str)
+                or not isinstance(raw_target, str)
+                or (raw_type is not None and not isinstance(raw_type, str))
+                or (raw_gender is not None and not isinstance(raw_gender, str))
+                or (
+                    raw_aliases is not None
+                    and (
+                        not isinstance(raw_aliases, list)
+                        or not all(isinstance(a, str) for a in raw_aliases)
+                    )
+                )
+            ):
+                return [], False
+            source = raw_source.strip()
+            target = raw_target.strip()
             if not source or not target or source not in allowed_sources:
                 continue
-            term_type = str(item.get("type") or "term").strip().lower()
+            term_type = str(raw_type or "term").strip().lower()
             if term_type not in _VALID_TYPES:
                 term_type = "term"
-            gender = str(item.get("gender") or "").strip() if term_type == "person" else ""
-            raw_aliases = item.get("aliases")
-            aliases = (
-                [str(a).strip() for a in raw_aliases if isinstance(a, str) and a.strip()]
-                if isinstance(raw_aliases, list)
-                else []
-            )
+            gender = str(raw_gender or "").strip() if term_type == "person" else ""
+            aliases = [a.strip() for a in (raw_aliases or []) if a.strip()]
             out.append(
                 GlossaryTerm(
                     source=source,
