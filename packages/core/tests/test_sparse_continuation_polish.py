@@ -151,13 +151,15 @@ def test_repair_escaped_newlines_preserves_source_literals_code_urls_and_markers
     assert repair_escaped_newlines("第一行\n第二行", "Line 1\\nLine 2") == "Line 1\nLine 2"
     # Source already has literal \n -> untouched.
     assert repair_escaped_newlines(r"literal \n here", r"literal \n here") == r"literal \n here"
-    # Protected spans untouched (code, URLs, markers, inline math, Windows paths, and bare \nu).
+    # Protected spans and unprotected \nu / \frac{1}{\nu} / dir\new stay untouched.
     assert (
         repair_escaped_newlines(
             "原文",
-            "Before `a\\nb` https://ex.com/\\n 〘object:a\\nb〙 $\\nu$ C:\\new\\dir \\nu end\\nnext",
+            "Before `a\\nb` https://ex.com/\\n 〘object:a\\nb〙 $\\nu$ "
+            "\\frac{1}{\\nu} C:\\new\\dir dir\\new \\nu end.\\nnext",
         )
-        == "Before `a\\nb` https://ex.com/\\n 〘object:a\\nb〙 $\\nu$ C:\\new\\dir \\nu end\nnext"
+        == "Before `a\\nb` https://ex.com/\\n 〘object:a\\nb〙 $\\nu$ "
+        "\\frac{1}{\\nu} C:\\new\\dir dir\\new \\nu end.\nnext"
     )
 
 
