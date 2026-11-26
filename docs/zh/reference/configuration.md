@@ -357,7 +357,7 @@ CLI 只覆盖其参数明确支持的设置；Web/Desktop 项目限制见[作用
 | `pipeline.consistency_sweep` | `false` | 启用快速译后跨章扫描：通过稀疏编辑器修补缺少术语规范译名的段落，并校准已确认的称号漂移；不会用前文章节的译文覆盖重复段落。 |
 | `pipeline.batch_glossary` | `all` | `all` 向每个正文翻译、润色和精翻请求发送全量实体术语（EPUB 目录标题仅在命中本批原文时携带）；`relevant` 只向每批发送与其文本匹配的词条，并让抽取只看到被抽取文本中出现的已有词条。见[翻译上下文与术语库](../guide/pipeline.md#context-and-glossary)。 |
 | `pipeline.glossary_prompt_tokens` | `0` | 可选的单次请求术语表 token 上限（`cl100k_base`，整数 ≥ 0）。`0` 表示不设上限，发送内容只由 `batch_glossary` 决定。设置上限后，`all` 保留追加稳定的前导词条加命中本批的后续词条，`relevant` 限制命中词条总量。 |
-| `pipeline.skip_boilerplate` | `false` | 可选的导入时清理开关：将抓取站点的水印（域名与推广文字同行）、广告网络标记和单独的 `>`/`|` 行标记为 `meta.skip = true` 而非删除，从而跳过翻译与导出同时保持段落索引与锚点稳定。单独的网址行和 `...No` 这类以标点开头的短句保留为正文；站点特有的残留请用 `boilerplate_patterns` 匹配。 |
+| `pipeline.skip_boilerplate` | `false` | 可选的导入时清理开关：将抓取站点的水印（域名与推广文字同行）、广告网络标记和单独的 `>` 或竖线（`\|`）行标记为 `meta.skip = true` 而非删除，从而跳过翻译与导出同时保持段落索引与锚点稳定。单独的网址行和 `...No` 这类以标点开头的短句保留为正文；站点特有的残留请用 `boilerplate_patterns` 匹配。内置规则变更后会重新解析缓存的原文，但已初始化的项目在重新导入前保留原有的跳过标记。 |
 | `pipeline.boilerplate_patterns` | `[]` | 启用 `pipeline.skip_boilerplate` 时额外匹配的自定义正则表达式列表。 |
 | `pipeline.align_retry_limit` | `2` | 额外结构输出尝试次数；`0` 关闭。 |
 | `pipeline.rolling_context_tokens` | `512` | 前文译文预算，整数 ≥ 0，按 `cl100k_base` 计数。 |

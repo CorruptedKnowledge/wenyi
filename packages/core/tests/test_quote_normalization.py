@@ -249,3 +249,9 @@ def test_export_view_normalizes_quotes_across_continuation_segments(tmp_path):
     chapter = view.load_chapter(0)
     assert chapter.segments[0].target == "“First half "
     assert chapter.segments[1].target == "second half.”"
+
+
+def test_preserve_style_never_reports_normalization():
+    from wenyi_core.assemble.quotes import supports_quote_normalization
+
+    assert supports_quote_normalization("en", "preserve") is False

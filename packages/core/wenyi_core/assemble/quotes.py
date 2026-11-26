@@ -76,6 +76,8 @@ def _base_language(target_lang: str | None) -> str:
 
 def supports_quote_normalization(target_lang: str | None, style: QuoteStyle = "straight") -> bool:
     """Return True when ``style`` keeps the target language's quote conventions intact."""
+    if style == "preserve":
+        return False
     base = _base_language(target_lang)
     if style == "typographic":
         return base in TYPOGRAPHIC_TARGETS
