@@ -218,7 +218,7 @@ class SparseSemanticEditor(Agent):
         system_msg, user_msg, _effective, _shrunk = fit_prompt_to_context_window(
             config=self.config,
             operation="polish.body",
-            terms=list(glossary_terms),
+            terms=full_glossary,
             match_text=match_text,
             render_messages=_render,
         )

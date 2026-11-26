@@ -318,6 +318,7 @@ class ParallelChapterRunner:
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="wenyi-chapter-worker"
         ) as executor:
+            unpersisted_ready: list[_ChapterOutcome] = []
             try:
                 while (next_pos < len(specs) and not stop.is_set()) or in_flight:
                     while not stop.is_set() and next_pos < len(specs) and len(in_flight) < workers:
@@ -341,19 +342,24 @@ class ParallelChapterRunner:
                         in_flight.pop(fut)
                         ready.append(fut.result())
                     ready.sort(key=lambda item: item.chapter)
+                    unpersisted_ready = list(ready)
 
-                    # Phase 1: persist ALL completed batches and checkpoint usage across the
-                    # entire wave BEFORE cancellable alignment or progress() runs.
+                    # Phase 1: durably save every completed chapter in the wave BEFORE emitting
+                    # events, running cancellable alignment, or calling progress().
                     last_label: str | None = None
                     to_finalize: list[tuple[_ChapterOutcome, list[tuple[int, int]]]] = []
-                    for outcome in ready:
-                        done, align_ranges = self._persist_outcome_batches(
+                    pending_events: list[tuple[str, dict[str, Any]]] = []
+                    while unpersisted_ready:
+                        outcome = unpersisted_ready[0]
+                        done, align_ranges, events = self._persist_outcome_batches(
                             store,
                             chapters_by_id[outcome.chapter],
                             outcome,
                             polish=polish,
                             done=done,
                         )
+                        unpersisted_ready.pop(0)
+                        pending_events.extend(events)
                         last_label = self._progress_label(
                             chapters_by_id[outcome.chapter].title, outcome.chapter
                         )
@@ -364,6 +370,8 @@ class ParallelChapterRunner:
                         else:
                             to_finalize.append((outcome, align_ranges))
                     self._flush_usage(store, "chapter")
+                    for event_name, payload in pending_events:
+                        store.log_event(event_name, **payload)
 
                     # Phase 2: run alignment and chapter publication only after all wave
                     # targets are durably saved. Alignment remains resumable if cancelled.
@@ -387,15 +395,16 @@ class ParallelChapterRunner:
                     ):
                         progress(done, total, last_label)
             except BaseException:
-                # Signal workers to stop, cancel unstarted futures, and persist any completed
-                # batches from already-running workers so paid work is never discarded on Pause.
+                # Signal workers to stop, cancel unstarted futures, and persist any remaining
+                # ready outcomes plus completed batches from already-running workers.
                 stop.set()
                 running_futs: list[Future[_ChapterOutcome]] = []
                 for fut in list(in_flight):
                     if not fut.cancel():
                         running_futs.append(fut)
                 in_flight.clear()
-                drained: list[_ChapterOutcome] = []
+                drained: list[_ChapterOutcome] = list(unpersisted_ready)
+                unpersisted_ready.clear()
                 for fut in running_futs:
                     try:
                         drained.append(fut.result())
@@ -403,7 +412,7 @@ class ParallelChapterRunner:
                         pass
                 drained.sort(key=lambda item: item.chapter)
                 for outcome in drained:
-                    done, _ = self._persist_outcome_batches(
+                    done, _, _ = self._persist_outcome_batches(
                         store,
                         chapters_by_id[outcome.chapter],
                         outcome,
@@ -574,11 +583,12 @@ class ParallelChapterRunner:
         *,
         polish: bool,
         done: int,
-    ) -> tuple[int, list[tuple[int, int]]]:
-        """Durably persist every completed batch in ``outcome`` without cancellable LLM calls."""
+    ) -> tuple[int, list[tuple[int, int]], list[tuple[str, dict[str, Any]]]]:
+        """Atomically persist every completed batch in ``outcome`` before emitting events."""
         ci = outcome.chapter
         text_segs = chapter.text_segments
         align_ranges: list[tuple[int, int]] = []
+        events: list[tuple[str, dict[str, Any]]] = []
 
         for item in outcome.batches:
             count = len(item.sources)
@@ -608,31 +618,38 @@ class ParallelChapterRunner:
                     seg.meta.pop(POLISH_FAILED, None)
                     seg.meta.pop(POLISH_ATTEMPTS, None)
                     applied = True
-                store.save_chapter(chapter)
                 if item.result.polish_empty_reverted:
-                    store.log_event(
-                        "batch_polish_empty_kept",
-                        chapter=ci,
-                        start_index=item.batch_start,
-                        count=count,
-                        reverted_indices=list(item.result.polish_empty_reverted),
+                    events.append(
+                        (
+                            "batch_polish_empty_kept",
+                            {
+                                "chapter": ci,
+                                "start_index": item.batch_start,
+                                "count": count,
+                                "reverted_indices": list(item.result.polish_empty_reverted),
+                            },
+                        )
                     )
                 if applied or not item.result.polish_failed:
                     if applied:
                         align_ranges.append((item.batch_start, count))
-                    store.log_event(
-                        "batch_polished",
-                        chapter=ci,
-                        start_index=item.batch_start,
-                        count=count,
+                    events.append(
+                        (
+                            "batch_polished",
+                            {"chapter": ci, "start_index": item.batch_start, "count": count},
+                        )
                     )
                 else:
-                    store.log_event(
-                        "batch_polish_failed",
-                        chapter=ci,
-                        start_index=item.batch_start,
-                        count=count,
-                        reason=item.polish_error_reason or "misaligned_output",
+                    events.append(
+                        (
+                            "batch_polish_failed",
+                            {
+                                "chapter": ci,
+                                "start_index": item.batch_start,
+                                "count": count,
+                                "reason": item.polish_error_reason or "misaligned_output",
+                            },
+                        )
                     )
                 continue
 
@@ -647,47 +664,64 @@ class ParallelChapterRunner:
                 else:
                     seg.meta.pop(POLISH_FAILED, None)
                     seg.meta.pop(POLISH_ATTEMPTS, None)
-            store.save_chapter(chapter)
             align_ranges.append((item.batch_start, count))
             if item.result.polish_empty_reverted:
-                store.log_event(
-                    "batch_polish_empty_kept",
-                    chapter=ci,
-                    start_index=item.batch_start,
-                    count=count,
-                    reverted_indices=list(item.result.polish_empty_reverted),
+                events.append(
+                    (
+                        "batch_polish_empty_kept",
+                        {
+                            "chapter": ci,
+                            "start_index": item.batch_start,
+                            "count": count,
+                            "reverted_indices": list(item.result.polish_empty_reverted),
+                        },
+                    )
                 )
             if item.result.polish_interrupted is not None:
-                store.log_event(
-                    "batch_polish_failed",
-                    chapter=ci,
-                    start_index=item.batch_start,
-                    count=count,
-                    reason="provider_interrupted",
+                events.append(
+                    (
+                        "batch_polish_failed",
+                        {
+                            "chapter": ci,
+                            "start_index": item.batch_start,
+                            "count": count,
+                            "reason": "provider_interrupted",
+                        },
+                    )
                 )
             elif item.result.polish_failed:
-                store.log_event(
-                    "batch_polish_failed",
-                    chapter=ci,
-                    start_index=item.batch_start,
-                    count=count,
-                    reason="misaligned_output",
+                events.append(
+                    (
+                        "batch_polish_failed",
+                        {
+                            "chapter": ci,
+                            "start_index": item.batch_start,
+                            "count": count,
+                            "reason": "misaligned_output",
+                        },
+                    )
                 )
-            store.log_event(
-                "batch_translated",
-                chapter=ci,
-                start_index=item.batch_start,
-                count=count,
-                polished=polish and not item.result.polish_failed,
-                translation_mode="standard",
-                segments=[
-                    {"index": item.batch_start + i, "source": s.source, "target": s.target}
-                    for i, s in enumerate(batch_segs)
-                ],
+            events.append(
+                (
+                    "batch_translated",
+                    {
+                        "chapter": ci,
+                        "start_index": item.batch_start,
+                        "count": count,
+                        "polished": polish and not item.result.polish_failed,
+                        "translation_mode": "standard",
+                        "segments": [
+                            {"index": item.batch_start + i, "source": s.source, "target": s.target}
+                            for i, s in enumerate(batch_segs)
+                        ],
+                    },
+                )
             )
             done += count
 
-        return done, align_ranges
+        if outcome.batches:
+            store.save_chapter(chapter)
+        return done, align_ranges, events
 
     def _finalize_outcome(
         self,

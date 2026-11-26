@@ -8,7 +8,6 @@ frozen upfront CJK glossary and delegate concurrent chapters to ``ParallelChapte
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
@@ -47,6 +46,7 @@ from .translation_batch import (
     BatchPlan,
     PolishJob,
     TranslationBatchExecutor,
+    glossary_checkpoint_covers,
     keep_nonempty_drafts,
     mark_polish_failure,
     resume_batches,
@@ -283,21 +283,7 @@ class TranslationService:
             for batch in resume_batches(group, self._runtime.config.segment.max_tokens_per_batch)
         ]
 
-    @staticmethod
-    def _glossary_checkpoint_covers(checkpoints: set[str], start: int, count: int) -> bool:
-        """Reuse completed extraction when BabelDOC role boundaries split an older batch."""
-        ranges = sorted(
-            (int(m.group(1)), int(m.group(1)) + int(m.group(2)))
-            for key in checkpoints
-            if (m := re.fullmatch(r"(\d+):([1-9]\d*)", key)) is not None
-        )
-        cursor = start
-        for saved_start, saved_end in ranges:
-            if saved_start <= cursor < saved_end:
-                cursor = saved_end
-                if cursor >= start + count:
-                    return True
-        return False
+    _glossary_checkpoint_covers = staticmethod(glossary_checkpoint_covers)
 
     def translate_chapter(
         self,
@@ -365,10 +351,17 @@ class TranslationService:
                     s.meta.get(POLISH_PENDING) or s.meta.get(POLISH_FAILED) for s in b
                 )
                 self._align_batch_context(store, chapter, text_segs, batch_start, len(b))
-                if glossary_key in glossary_checkpoints or (
-                    context_policy is not None
-                    and self._glossary_checkpoint_covers(glossary_checkpoints, batch_start, len(b))
-                ):
+                skip_extract = (
+                    reopened_done
+                    or glossary_key in glossary_checkpoints
+                    or (
+                        context_policy is not None
+                        and self._glossary_checkpoint_covers(
+                            glossary_checkpoints, batch_start, len(b)
+                        )
+                    )
+                )
+                if skip_extract:
                     if self._extraction_queue is not None and self._extraction_queue.settle():
                         term_snapshot_stale = True
                     summary = {

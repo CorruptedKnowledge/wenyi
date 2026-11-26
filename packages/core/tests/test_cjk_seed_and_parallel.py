@@ -654,7 +654,8 @@ def test_cjk_seeder_absorbs_400_content_filter_validates_rows_and_keeps_count_pa
         ).seed_result(cand, max_workers=1)
         assert res_bad.complete is False
 
-    # 2. HTTP 400 (e.g. DeepSeek "Content Exists Risk") is absorbed as incomplete instead of crashing.
+    # 2. HTTP 400 (e.g. DeepSeek "Content Exists Risk") is absorbed as incomplete, while
+    # misconfiguration errors like HTTP 405 still propagate.
     def fail_400(messages, tier, json_mode):
         raise ProviderRequestError(
             provider="deepseek",
@@ -665,10 +666,23 @@ def test_cjk_seeder_absorbs_400_content_filter_validates_rows_and_keeps_count_pa
             resumable=False,
         )
 
+    def fail_405(messages, tier, json_mode):
+        raise ProviderRequestError(
+            provider="deepseek",
+            operation="glossary.extract",
+            error_type="http_error",
+            status_code=405,
+            reason=None,
+            resumable=False,
+        )
+
     res_400 = CjkGlossarySeeder(FakeClient(handler=fail_400), cfg).seed_result(cand, max_workers=1)
     assert res_400.complete is False and res_400.terms == []
+    with pytest.raises(ProviderRequestError):
+        CjkGlossarySeeder(FakeClient(handler=fail_405), cfg).seed_result(cand, max_workers=1)
 
-    # 3. Incomplete seed retries are capped at 2 attempts on deterministic 400 so runs stop re-paying.
+    # 3. Incomplete seed retries are capped at 2 attempts on deterministic 400 so runs stop
+    # re-paying, and an interrupted publication after attempt 2 replays with 0 extra LLM calls.
     book = "第一章 一\n\n林尘离开青云宗。\n\n第二章 二\n\n林尘回到青云宗。\n"
     src_path = tmp_path / "cap_seed.txt"
     src_path.write_text(book, encoding="utf-8")
@@ -697,12 +711,109 @@ def test_cjk_seeder_absorbs_400_content_filter_validates_rows_and_keeps_count_pa
         orch.run(str(src_path))
     assert seed_attempts == 2  # Capped after 2 deterministic failures.
 
-    # 4. Counting parity across the 250-candidate threshold (strictly non-overlapping).
+    # Simulate an interrupted publication right after attempt 2 wrote published=False.
+    cached = store.read_artifact(SEED_ARTIFACT_KEY)
+    assert isinstance(cached, dict)
+    store.write_artifact(SEED_ARTIFACT_KEY, {**cached, "published": False})
+    for ci in (0, 1):
+        store.set_chapter_status(ci, "pending")
+    orch.run(str(src_path))
+    assert seed_attempts == 2  # Replayed without a 3rd model call.
+    assert store.read_artifact(SEED_ARTIFACT_KEY)["published"] is True
+
+    # 4. Counting parity across the 250-candidate threshold using pure-CJK tokens so the
+    # >250 branch genuinely runs the linear scan with strictly non-overlapping counts.
     small = _count_candidates_in_corpus("哈哈哈", {"哈哈"})
-    large_cands = {"哈哈"} | {f"词{i:03d}" for i in range(260)}
-    large = _count_candidates_in_corpus("哈哈哈", large_cands)
+    pure_cjk_filler = {chr(0x4E00 + i) + chr(0x4E00 + i + 1) for i in range(260)}
+    large = _count_candidates_in_corpus("哈哈哈", {"哈哈"} | pure_cjk_filler)
     assert small == {}
     assert large == {}
+
+
+def test_parallel_ctrl_c_during_batch_event_still_saves_all_wave_targets(tmp_path):
+    book = "第一章 一\n\n第一段。\n\n第二段。\n\n第二章 二\n\n第三段。\n\n第四段。\n"
+    src_path = tmp_path / "event_interrupt.txt"
+    src_path.write_text(book, encoding="utf-8")
+
+    cfg = fake_pipeline_config(os.path.join(tmp_path, "state"))
+    cfg.source_lang = "zh"
+    cfg.target_lang = "en"
+    cfg.pipeline.review = False
+    cfg.pipeline.polish = False
+    cfg.pipeline.book_understanding = False
+    cfg.pipeline.chapter_concurrency = 2
+    cfg.segment.max_tokens_per_batch = 1
+
+    orch = Orchestrator(cfg, client=MeteredFakeClient(handler=routing_handler))
+    store = require_file_storage(orch.prepare(str(src_path)))
+
+    orig_log = store.log_event
+
+    def interrupt_on_first_batch_event(event, **kwargs):
+        if event == "batch_translated":
+            raise KeyboardInterrupt("ctrl-c during log_event")
+        return orig_log(event, **kwargs)
+
+    store.log_event = interrupt_on_first_batch_event  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        orch._translation.run(store, book_synopsis="")
+
+    # Every completed batch of every chapter in the wave was durably saved before log_event ran.
+    saved = [
+        seg.target
+        for ci in (0, 1)
+        for seg in store.load_chapter(ci).text_segments
+        if seg.target is not None
+    ]
+    assert len(saved) >= 3
+
+
+def test_resuming_single_unpolished_chapter_after_parallel_run_skips_batch_extraction(tmp_path):
+    book = "第一章 启程\n\n第一段。\n\n第二章 试炼\n\n第二段。\n"
+    src_path = tmp_path / "single_repolish.txt"
+    src_path.write_text(book, encoding="utf-8")
+
+    cfg = fake_pipeline_config(os.path.join(tmp_path, "state"))
+    cfg.source_lang = "zh"
+    cfg.target_lang = "en"
+    cfg.pipeline.review = False
+    cfg.pipeline.polish = True
+    cfg.pipeline.polish_mode = "sparse"
+    cfg.pipeline.book_understanding = False
+    cfg.pipeline.chapter_concurrency = 2
+
+    extract_calls = 0
+    fail_ch1_polish = True
+
+    def handler(messages, tier, json_mode):
+        nonlocal extract_calls
+        system = messages[0]["content"]
+        if "compile a consistent glossary" in system:
+            return json.dumps({"terms": []})
+        if tier == "glossary.extract":
+            extract_calls += 1
+        if tier == "polish.body" and fail_ch1_polish and "第二段" in messages[1]["content"]:
+            return "not valid json"
+        if tier == "polish.body":
+            return json.dumps({"patches": [{"index": 0, "text": "Polished.", "reason": "flow"}]})
+        return routing_handler(messages, tier, json_mode)
+
+    orch = Orchestrator(cfg, client=MeteredFakeClient(handler=handler))
+    store = require_file_storage(orch.prepare(str(src_path)))
+    orch.run(str(src_path))
+
+    # Chapter 0 finished cleanly; chapter 1 finished STATUS_DONE with unpolished=True.
+    manifest = store.load_manifest()
+    assert not manifest["chapters"][0].get("unpolished")
+    assert manifest["chapters"][1].get("unpolished") is True
+
+    # Resume has 1 target (chapter 1) -> falls back to serial translate_chapter with
+    # reopened_done=True and must run ZERO glossary.extract calls.
+    extract_calls = 0
+    fail_ch1_polish = False
+    orch.run(str(src_path))
+    assert extract_calls == 0
+    assert not store.load_manifest()["chapters"][1].get("unpolished")
 
 
 def test_preflight_trimming_never_promotes_per_batch_overflow_into_system_glossary():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
@@ -328,3 +329,19 @@ def resume_batches(segments: list[Segment], max_tokens: int) -> list[list[Segmen
         if current:
             batches.append(current)
     return batches
+
+
+def glossary_checkpoint_covers(checkpoints: set[str], start: int, count: int) -> bool:
+    """Reuse completed extraction when BabelDOC role boundaries split an older batch."""
+    ranges = sorted(
+        (int(m.group(1)), int(m.group(1)) + int(m.group(2)))
+        for key in checkpoints
+        if (m := re.fullmatch(r"(\d+):([1-9]\d*)", key)) is not None
+    )
+    cursor = start
+    for saved_start, saved_end in ranges:
+        if saved_start <= cursor < saved_end:
+            cursor = saved_end
+            if cursor >= start + count:
+                return True
+    return False

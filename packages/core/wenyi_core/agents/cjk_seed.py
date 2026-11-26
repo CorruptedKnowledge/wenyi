@@ -411,15 +411,17 @@ class CjkGlossarySeeder(Agent):
             _LOGGER.warning("CJK glossary seed chunk failed (%s); skipping chunk", exc)
             return [], False
         except ProviderRequestError as exc:
-            # Propagate resumable outages and fatal auth/model errors; absorb content-filter
-            # 400/422 errors so one noisy seed chunk never blocks translating the whole book.
-            if exc.resumable or exc.status_code in {401, 403, 404}:
+            # Propagate resumable outages and non-content provider errors (e.g. 401/403/404/405);
+            # absorb only HTTP 400/422 content-filter rejections so one noisy chunk never bricks a book.
+            if exc.resumable or exc.status_code not in {400, 422}:
                 raise
             _LOGGER.warning("CJK glossary seed chunk provider error (%s); skipping chunk", exc)
             return [], False
         except Exception as exc:
             status = error_status_code(exc)
-            if is_resumable_provider_interrupt(exc) or status in {401, 403, 404}:
+            if is_resumable_provider_interrupt(exc) or (
+                status is not None and status not in {400, 422}
+            ):
                 raise
             _LOGGER.warning("CJK glossary seed chunk error (%s); skipping chunk", exc)
             return [], False

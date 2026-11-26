@@ -90,7 +90,10 @@ class CjkGlossarySeedService:
             # on subsequent runs so user-deleted seed terms stay deleted.
             if cached.get("published") is True:
                 return 0
-            if cached.get("complete", True) is True:
+            if (
+                cached.get("complete", True) is True
+                or prior_attempts >= _MAX_INCOMPLETE_SEED_ATTEMPTS
+            ):
                 terms = [self._deserialize_term(item) for item in cached["terms"]]
                 terms = [t for t in terms if t is not None and t.source not in user_deleted]
                 published = self._publish_idempotent(store, terms)
