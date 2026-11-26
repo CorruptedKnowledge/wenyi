@@ -768,6 +768,56 @@ def test_parallel_ctrl_c_during_batch_event_still_saves_all_wave_targets(tmp_pat
     assert len(saved) >= 3
 
 
+def test_parallel_interrupted_save_chapter_retries_without_double_consuming_polish_attempt(
+    tmp_path,
+):
+    book = "第一章 启程\n\n第一段。\n\n第二章 试炼\n\n第二段。\n"
+    src_path = tmp_path / "save_interrupt.txt"
+    src_path.write_text(book, encoding="utf-8")
+
+    cfg = fake_pipeline_config(os.path.join(tmp_path, "state"))
+    cfg.source_lang = "zh"
+    cfg.target_lang = "en"
+    cfg.pipeline.review = False
+    cfg.pipeline.polish = True
+    cfg.pipeline.polish_mode = "sparse"
+    cfg.pipeline.book_understanding = False
+    cfg.pipeline.chapter_concurrency = 2
+
+    def bad_polish(messages, tier, json_mode):
+        if "compile a consistent glossary" in messages[0]["content"]:
+            return json.dumps({"terms": []})
+        if tier == "polish.body":
+            return "not valid json"
+        return routing_handler(messages, tier, json_mode)
+
+    orch = Orchestrator(cfg, client=MeteredFakeClient(handler=bad_polish))
+    store = require_file_storage(orch.prepare(str(src_path)))
+
+    orig_save = store.save_chapter
+    interrupted_once = False
+
+    def interrupt_first_save(chapter):
+        nonlocal interrupted_once
+        if not interrupted_once:
+            interrupted_once = True
+            raise KeyboardInterrupt("ctrl-c during save_chapter")
+        return orig_save(chapter)
+
+    store.save_chapter = interrupt_first_save  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        orch._translation.run(store, book_synopsis="")
+
+    # Drain retried save_chapter cleanly WITHOUT reapplying mark_polish_failure a second time,
+    # so POLISH_FAILED stays set with polish_attempts == 1 (never exhausted to 2).
+    saved_ch0 = store.load_chapter(0)
+    saved_ch1 = store.load_chapter(1)
+    saved_segs = [s for ch in (saved_ch0, saved_ch1) for s in ch.text_segments if s.target]
+    assert len(saved_segs) >= 2
+    assert all(s.meta.get(POLISH_FAILED) is True for s in saved_segs)
+    assert all(s.meta.get("polish_attempts") == 1 for s in saved_segs)
+
+
 def test_resuming_single_unpolished_chapter_after_parallel_run_skips_batch_extraction(tmp_path):
     book = "第一章 启程\n\n第一段。\n\n第二章 试炼\n\n第二段。\n"
     src_path = tmp_path / "single_repolish.txt"

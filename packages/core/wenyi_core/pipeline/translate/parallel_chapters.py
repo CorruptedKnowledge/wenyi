@@ -318,7 +318,7 @@ class ParallelChapterRunner:
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="wenyi-chapter-worker"
         ) as executor:
-            unpersisted_ready: list[_ChapterOutcome] = []
+            applied_chapters: set[int] = set()
             try:
                 while (next_pos < len(specs) and not stop.is_set()) or in_flight:
                     while not stop.is_set() and next_pos < len(specs) and len(in_flight) < workers:
@@ -337,32 +337,33 @@ class ParallelChapterRunner:
                     if not in_flight:
                         break
                     finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
-                    ready: list[_ChapterOutcome] = []
-                    for fut in finished:
-                        in_flight.pop(fut)
-                        ready.append(fut.result())
-                    ready.sort(key=lambda item: item.chapter)
-                    unpersisted_ready = list(ready)
+                    # Keep every future tracked in ``in_flight`` until its chapter is durably
+                    # saved so an interrupt at any handoff point still recovers it cleanly.
+                    ready_pairs = [(fut, fut.result()) for fut in finished]
+                    ready_pairs.sort(key=lambda pair: pair[1].chapter)
 
-                    # Phase 1: durably save every completed chapter in the wave BEFORE emitting
-                    # events, running cancellable alignment, or calling progress().
+                    # Phase 1: apply once in memory and durably save every completed chapter in
+                    # the wave BEFORE removing its future, emitting events, or aligning.
                     last_label: str | None = None
                     to_finalize: list[tuple[_ChapterOutcome, list[tuple[int, int]]]] = []
                     pending_events: list[tuple[str, dict[str, Any]]] = []
-                    while unpersisted_ready:
-                        outcome = unpersisted_ready[0]
-                        done, align_ranges, events = self._persist_outcome_batches(
-                            store,
-                            chapters_by_id[outcome.chapter],
-                            outcome,
-                            polish=polish,
-                            done=done,
-                        )
-                        unpersisted_ready.pop(0)
+                    for fut, outcome in ready_pairs:
+                        chapter = chapters_by_id[outcome.chapter]
+                        align_ranges: list[tuple[int, int]] = []
+                        events: list[tuple[str, dict[str, Any]]] = []
+                        if outcome.chapter not in applied_chapters:
+                            done, align_ranges, events = self._apply_outcome_to_chapter(
+                                chapter,
+                                outcome,
+                                polish=polish,
+                                done=done,
+                            )
+                            applied_chapters.add(outcome.chapter)
+                        if outcome.batches:
+                            store.save_chapter(chapter)
+                        in_flight.pop(fut, None)
                         pending_events.extend(events)
-                        last_label = self._progress_label(
-                            chapters_by_id[outcome.chapter].title, outcome.chapter
-                        )
+                        last_label = self._progress_label(chapter.title, outcome.chapter)
                         if outcome.error is not None:
                             stop.set()
                             if first_error is None:
@@ -395,30 +396,33 @@ class ParallelChapterRunner:
                     ):
                         progress(done, total, last_label)
             except BaseException:
-                # Signal workers to stop, cancel unstarted futures, and persist any remaining
-                # ready outcomes plus completed batches from already-running workers.
+                # Signal workers to stop, cancel unstarted futures, and durably save every
+                # already-done or running future without reapplying already-mutated chapters.
                 stop.set()
-                running_futs: list[Future[_ChapterOutcome]] = []
+                remaining_futs: list[Future[_ChapterOutcome]] = []
                 for fut in list(in_flight):
-                    if not fut.cancel():
-                        running_futs.append(fut)
+                    if fut.done() or not fut.cancel():
+                        remaining_futs.append(fut)
                 in_flight.clear()
-                drained: list[_ChapterOutcome] = list(unpersisted_ready)
-                unpersisted_ready.clear()
-                for fut in running_futs:
+                drained: list[_ChapterOutcome] = []
+                for fut in remaining_futs:
                     try:
                         drained.append(fut.result())
                     except BaseException:  # noqa: BLE001 - best-effort drain on interruption.
                         pass
                 drained.sort(key=lambda item: item.chapter)
                 for outcome in drained:
-                    done, _, _ = self._persist_outcome_batches(
-                        store,
-                        chapters_by_id[outcome.chapter],
-                        outcome,
-                        polish=polish,
-                        done=done,
-                    )
+                    chapter = chapters_by_id[outcome.chapter]
+                    if outcome.chapter not in applied_chapters:
+                        done, _, _ = self._apply_outcome_to_chapter(
+                            chapter,
+                            outcome,
+                            polish=polish,
+                            done=done,
+                        )
+                        applied_chapters.add(outcome.chapter)
+                    if outcome.batches:
+                        store.save_chapter(chapter)
                 if drained:
                     self._flush_usage(store, "chapter")
                 raise
@@ -575,16 +579,15 @@ class ParallelChapterRunner:
         completed = error is None and not stopped_early
         return _ChapterOutcome(spec.chapter, tuple(outcomes), error, completed)
 
-    def _persist_outcome_batches(
+    def _apply_outcome_to_chapter(
         self,
-        store: Storage,
         chapter: Chapter,
         outcome: _ChapterOutcome,
         *,
         polish: bool,
         done: int,
     ) -> tuple[int, list[tuple[int, int]], list[tuple[str, dict[str, Any]]]]:
-        """Atomically persist every completed batch in ``outcome`` before emitting events."""
+        """Apply every completed batch in ``outcome`` onto ``chapter`` once in memory."""
         ci = outcome.chapter
         text_segs = chapter.text_segments
         align_ranges: list[tuple[int, int]] = []
@@ -719,8 +722,6 @@ class ParallelChapterRunner:
             )
             done += count
 
-        if outcome.batches:
-            store.save_chapter(chapter)
         return done, align_ranges, events
 
     def _finalize_outcome(
