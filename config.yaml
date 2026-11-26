@@ -7,7 +7,7 @@ language:
 
 # ── LLM ──────────────────────────────────────────────────────────────────
 llm:
-  preset: deepseek # Registers deepseek-flash and assigns it to each operation.
+  preset: deepseek # Registers deepseek-flash; glossary.extract and review.scan use low thinking.
   # Select a registered connection/model for each operation with routes.<operation>.model.
   # Optionally override its thinking effort with routes.<operation>.thinking.
   # Budget and quota estimates divide prompt bytes by 2.0 by default; set
@@ -23,20 +23,33 @@ segment:
 
 # ── Pipeline options (quality and cost)───────────────────────────────────────────
 pipeline:
-  # Body translation and Reviewer requests always use the full glossary.
+  # Optional frozen glossary prefix cap in tokens (cl100k_base); 0 keeps the full entity glossary
+  # in the cached system prefix. Overflow and navigation entries are matched per batch in user.
+  glossary_prompt_tokens: 0
+  # Optional ingest-time filter for scraped-site watermarks, ad markers and lone >/| lines;
+  # add boilerplate_patterns for site-specific regular expressions.
+  skip_boilerplate: false
+  boilerplate_patterns: []
   review: true # Run final review after whole-book translation; disable with --no-review
   # Additional structural retries for standard translation and each precision stage; 0 disables retries.
   align_retry_limit: 2
   polish: true # Polish the full translation using polish.body; enabled by default and adds substantial cost
+  # full: rewrite every batch (default). sparse: source-grounded editor patching only defective paragraphs.
+  polish_mode: full # full | sparse
   translation_mode: standard # standard | three_draft_synthesis; three_draft_synthesis requires polish
+  # Concurrent chapter drafting workers; 1 translates serially with cross-chapter target context.
+  # Above 1, chapters translate concurrently using a lean CJK upfront glossary seed and a single writer.
+  chapter_concurrency: 1
+  # Background polish workers in serial mode; above 1, polishing overlaps subsequent batches.
+  polish_concurrency: 1
   rolling_context_tokens: 512 # Recent translation budget in tokens (tiktoken cl100k_base)
   glossary_note_workers: 0 # Incremental evidence notes: 0 disables, 1-16 workers per batch
   book_understanding: true # Prescan complete chapters for digests and a whole-book synopsis; disable to save prescan cost
-  prescan_concurrency: 4 # Concurrent chapter-digest workers; chapters are independent, 1 runs serially
+  prescan_concurrency: 4 # Concurrent prescan workers for chapter digests and book-synopsis reduction; 1 runs serially
   # Prescan content budgets in cl100k_base tokens; prompt/context overhead is additional.
   # Larger values reduce splitting but may exceed model limits or reduce summary quality.
   synopsis_source_tokens: 8000 # Maximum source tokens per chapter-digest chunk
-  synopsis_reduce_tokens: 12000 # Maximum joined digest tokens per merge and per generated summary
+  synopsis_reduce_tokens: 12000 # Maximum joined digest tokens per merge, generated summary, and style-analysis digest block
   annotation_alignment: true # Align translated annotations; EPUB uses fallback markers, PDF omits failed items
   annotation_alignment_concurrency: 4 # Maximum concurrent per-annotation requests for a logical paragraph with multiple annotations
   review_concurrency: 4 # Concurrent review blocks over a read-only translation/glossary snapshot; 1 runs serially

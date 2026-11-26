@@ -45,6 +45,11 @@ class DeepSeekOptions(BaseModel):
     extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
+# Glossary extraction and initial review scanning run across every batch/chapter; low
+# thinking keeps them fast and cheap while leaving review fixes/arbitration at full effort.
+PRESET_THINKING = {"glossary.extract": "low", "review.scan": "low"}
+
+
 def preset_model() -> ResolvedModel[DeepSeekOptions]:
     return ResolvedModel("deepseek-flash", DeepSeekOptions())
 

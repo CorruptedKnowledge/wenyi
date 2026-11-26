@@ -12,9 +12,12 @@ from typing import Any
 
 from ..errors import WenyiError
 from ..glossary.notes import NoteJournal
+from ..glossary.prompt_scope import scope_navigation_terms
 from ..glossary.store import GlossaryStore, GlossaryTerm
 from ..llm.json_parser import parse_json_result
+from ..llm.preflight import fit_prompt_to_context_window
 from ..llm.retrying import TruncatedResponseError
+from ..models.glossary import TYPE_NAVIGATION
 from . import prompts
 from .base import Agent
 
@@ -34,6 +37,11 @@ class ReviewResult:
     issues: list[dict[str, Any]]
     repaired: bool = False
     glossary_alerts: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _wrap_untrusted_glossary(rendered_glossary: str) -> str:
+    """Delimit book/user-supplied glossary entries as untrusted data inside system context."""
+    return prompts.wrap_untrusted_glossary(rendered_glossary)
 
 
 def _note_checks(terms: list[GlossaryTerm], sources: list[str]) -> tuple[list[dict], str]:
@@ -98,23 +106,81 @@ class Reviewer(Agent):
         """Return issues with recovery metadata; leave service exceptions to the caller."""
         if not sources:
             return ReviewResult([])
-        system = self.render("reviewer_system", src=self.src, tgt=self.tgt)
-        notes, checks = _note_checks(glossary_terms or [], sources)
-        user = self.render(
-            "reviewer_user",
-            src=self.src,
-            tgt=self.tgt,
-            glossary=prompts.render_glossary(
-                glossary_terms or [],
+        system_template = self.render("reviewer_system", src=self.src, tgt=self.tgt)
+        pairs_text = prompts.numbered_pairs(sources, targets)
+        object_context_text = prompts.readonly_object_context(object_contexts)
+        legacy_user_has_glossary = any(
+            name == "reviewer_user" and ("$glossary" in text or "${glossary}" in text)
+            for name, text in self.language_policy.templates
+        )
+        last_render: dict[str, Any] = {}
+
+        def _render(terms_for_prompt: list[GlossaryTerm]) -> tuple[str, str]:
+            # Place the book-wide entity glossary at the end of the system message so every
+            # chunk shares a byte-identical prefix on a complete message boundary (enabling
+            # KV prefix caching on long review prompts). Chunk-matched navigation titles
+            # stay in the user message so per-chapter titles never invalidate the prefix.
+            entity_terms = [t for t in terms_for_prompt if t.type != TYPE_NAVIGATION]
+            nav_terms = [t for t in terms_for_prompt if t.type == TYPE_NAVIGATION]
+            shared_glossary = prompts.render_glossary(
+                entity_terms,
                 source_lang=self.src,
                 genre=self.language_policy.context.genre,
-            ),
-            n=len(sources),
-            pairs=prompts.numbered_pairs(sources, targets),
-        )
-        if checks:
-            user += "\n\n" + checks
-        user += prompts.readonly_object_context(object_contexts)
+            )
+            system_text = f"{system_template}\n\n{_wrap_untrusted_glossary(shared_glossary)}"
+            nav_glossary = (
+                prompts.render_glossary(
+                    nav_terms,
+                    source_lang=self.src,
+                    genre=self.language_policy.context.genre,
+                )
+                if nav_terms
+                else ""
+            )
+            # Note checks stay aligned with the exact terms rendered into this prompt so
+            # glossary_alert note_id validation always matches what the model actually saw.
+            prompt_notes, checks = _note_checks(terms_for_prompt, sources)
+            user_text = self.render(
+                "reviewer_user",
+                src=self.src,
+                tgt=self.tgt,
+                # Retained for projects whose frozen language-policy snapshot still holds
+                # the pre-cache-boundary reviewer_user template with $glossary.
+                glossary=nav_glossary or "(see [Glossary] in system instructions)",
+                n=len(sources),
+                pairs=pairs_text,
+            )
+            if nav_glossary and not legacy_user_has_glossary:
+                user_text = f"[Navigation titles]\n{nav_glossary}\n\n{user_text}"
+            if checks:
+                user_text += "\n\n" + checks
+            user_text += object_context_text
+            last_render.clear()
+            last_render.update(system=system_text, user=user_text, notes=prompt_notes)
+            return system_text, user_text
+
+        match_text = "\n".join(sources)
+        scoped_terms = scope_navigation_terms(list(glossary_terms or ()), match_text)
+        try:
+            system, user, effective_terms, _shrunk = fit_prompt_to_context_window(
+                config=self.config,
+                operation="review.scan",
+                terms=scoped_terms,
+                match_text=match_text,
+                render_messages=_render,
+            )
+        except ValueError as error:
+            # Multi-paragraph chunks can be bisected by review_adaptive; singletons cannot
+            # shrink further, so surface the actionable context-window error directly.
+            if len(sources) > 1:
+                raise ReviewOutputError("context_overflow") from error
+            raise
+        if last_render.get("system") == system and last_render.get("user") == user:
+            notes: list[dict] = last_render["notes"]
+        else:
+            # The returned prompt came from an earlier render call; recompute the note
+            # rows for the effective terms so note_id validation matches the final prompt.
+            notes = _note_checks(effective_terms, sources)[0]
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
