@@ -14,7 +14,9 @@ from wenyi_core.markup.annotations import (
     _ANNOTATION_MARKER_ONLY,
     _annotation_roots,
     _hoist_processing_instructions,
+    _is_internal_link,
     _is_text_string,
+    _range_marker_node,
 )
 from wenyi_core.markup.contracts import (
     _ATOMIC_INLINE_TAGS,
@@ -139,49 +141,76 @@ def _segment_content(
         text_parts.append(value)
         raw_length += len(value)
 
-    def walk(parent: Tag, *, inside_range: bool = False) -> None:
-        """Recursively collect body text and source offsets for nodes that must be preserved."""
-        for child in parent.children:
+    def walk(root: Tag, *, inside_range: bool = False) -> None:
+        """Iteratively collect body text and source offsets for nodes that must be preserved."""
+        stack: list[tuple] = [
+            ("enter", child, inside_range) for child in reversed(list(root.children))
+        ]
+        while stack:
+            item = stack.pop()
+            kind = item[0]
+            if kind == "end_ruby":
+                ruby_tag, base_start = item[1], item[2]
+                reading = "".join(rt.get_text() for rt in ruby_tag.find_all("rt")).strip()
+                if reading and raw_length > base_start:
+                    append_text(f"{RUBY_MARK_LEFT}{reading}{RUBY_MARK_RIGHT}")
+                continue
+            if kind == "end_range":
+                annotation_id, start = item[1], item[2]
+                annotation_events[annotation_id] = (start, raw_length)
+                continue
+
+            _, child, cur_range = item
             if isinstance(child, Tag):
                 if child.name == "ruby":
                     # Include base kanji in body text and append marked kana readings for translation/review disambiguation.
-                    base_start = raw_length
-                    walk(child, inside_range=inside_range)
-                    reading = "".join(rt.get_text() for rt in child.find_all("rt")).strip()
-                    if reading and raw_length > base_start:
-                        append_text(f"{RUBY_MARK_LEFT}{reading}{RUBY_MARK_RIGHT}")
+                    stack.append(("end_ruby", child, raw_length))
+                    for sub in reversed(list(child.children)):
+                        stack.append(("enter", sub, cur_range))
                     continue
                 if child.name in {"rt", "rp"}:
                     # Exclude standalone reading nodes from body text; the ruby branch already emits reading hints.
                     # Retain rt/rp elements in the template for bilingual export.
                     continue
-                if inside_range and id(child) in marker_node_ids:
+                if cur_range and id(child) in marker_node_ids:
                     # Annotation numbers in range links are structural markers, not translatable text.
                     continue
                 annotation = annotations.get(id(child))
                 if annotation is not None:
                     annotation_id = str(annotation["id"])
                     start = raw_length
+                    if id(child) in root_ids:
+                        preserved_nodes.append((child, raw_length))
+                        if annotation["mode"] == "range":
+                            stack.append(("end_range", annotation_id, start))
+                            for sub in reversed(list(child.children)):
+                                stack.append(("enter", sub, True))
+                        else:
+                            annotation_events[annotation_id] = (start, raw_length)
+                        continue
                     if annotation["mode"] == "range":
-                        walk(child, inside_range=True)
-                    annotation_events[annotation_id] = (start, raw_length)
+                        stack.append(("end_range", annotation_id, start))
+                        for sub in reversed(list(child.children)):
+                            stack.append(("enter", sub, True))
+                    else:
+                        annotation_events[annotation_id] = (start, raw_length)
+                    continue
                 if id(child) in root_ids:
                     preserved_nodes.append((child, raw_length))
-                elif annotation is not None:
                     continue
-                else:
-                    walk(child, inside_range=inside_range)
+                for sub in reversed(list(child.children)):
+                    stack.append(("enter", sub, cur_range))
             elif _is_text_string(child):
                 value = str(child)
                 if (
-                    inside_range
+                    cur_range
                     and isinstance(child.next_sibling, Tag)
                     and id(child.next_sibling) in marker_node_ids
                 ):
                     # Range note numbers are usually trailing. Formatting newlines before sup/sub are not body text;
                     # remove that trailing whitespace with the marker.
                     value = value.rstrip(" \t\r\n\f\v")
-                if inside_range and not value.strip():
+                if cur_range and not value.strip():
                     previous = child.previous_sibling
                     has_later_text = any(
                         sibling.get_text(strip=True)
@@ -374,20 +403,169 @@ def _split_direct_break_lines(element: Tag, soup: BeautifulSoup) -> list[Tag]:
     return targets
 
 
-def _translation_targets(
-    soup: BeautifulSoup,
-    *,
-    skip_navigation: bool,
-) -> list[Tag]:
-    """Select the finest safely replaceable EPUB nodes in document order.
-    Keep div/blockquote elements with child body blocks as containers. Direct link text
-    inside li becomes its own target, preserving list hierarchy and href.
-    """
+_LOOSE_TEXT_CONTAINERS = frozenset(
+    {
+        "body",
+        "div",
+        "section",
+        "article",
+        "main",
+        "aside",
+        "blockquote",
+        "dd",
+        "header",
+        "footer",
+        "figure",
+        "details",
+        "summary",
+        "address",
+    }
+)
+_NON_PROSE_TAGS = frozenset(
+    {"head", "script", "style", "noscript", "template", "title", "meta", "link"}
+)
+_STRUCTURAL_BOUNDARY_TAGS = frozenset(
+    {
+        "section",
+        "article",
+        "main",
+        "aside",
+        "header",
+        "footer",
+        "nav",
+        "ul",
+        "ol",
+        "dl",
+        "table",
+        "thead",
+        "tbody",
+        "tfoot",
+        "tr",
+        "figure",
+        "hr",
+        "pre",
+        "form",
+        "details",
+        "summary",
+        "address",
+        "fieldset",
+    }
+)
+_F_TEXT = 1 << 0
+_F_PROSE = 1 << 1
+_F_DESC_CANDIDATE = 1 << 2
+_F_DESC_ANY_BLOCK = 1 << 3
+_F_DESC_SPLIT = 1 << 4
+_F_DESC_NON_PROSE = 1 << 5
+_ASCII_WS = " \t\n\r\x0b\x0c"
+
+
+def _is_note_link(link: Tag) -> bool:
+    return _is_internal_link(link) and _range_marker_node(link) is not None
+
+
+def _compute_flags(root: Tag | BeautifulSoup) -> dict[int, int]:
+    """Compute bottom-up prose and structural flags iteratively in O(N) time."""
+    flags: dict[int, int] = {}
+    stack: list[tuple[Tag | BeautifulSoup | NavigableString, bool]] = [(root, False)]
+    while stack:
+        node, visited = stack.pop()
+        if not visited:
+            if isinstance(node, (Tag, BeautifulSoup)):
+                stack.append((node, True))
+                for child in reversed(list(node.children)):
+                    if isinstance(child, Tag) or _is_text_string(child):
+                        stack.append((child, False))
+            elif _is_text_string(node) and str(node).strip():
+                flags[id(node)] = _F_TEXT | _F_PROSE
+            continue
+        name = node.name if isinstance(node, Tag) else ""
+        prose_ok = not (
+            name in _ATOMIC_INLINE_TAGS or name in _NON_PROSE_TAGS or name in {"rt", "rp"}
+        )
+        f = 0
+        for child in node.children:
+            cf = flags.get(id(child), 0)
+            if cf & _F_TEXT:
+                f |= _F_TEXT
+            if prose_ok and (cf & _F_PROSE):
+                f |= _F_PROSE
+            if isinstance(child, Tag):
+                cname = child.name
+                is_internal_link = cname == "a" and _is_internal_link(child)
+                if (
+                    cname not in _ATOMIC_INLINE_TAGS
+                    and cname not in _NON_PROSE_TAGS
+                    and (
+                        (cname in _BLOCK_CANDIDATE_TAGS and (cf & _F_TEXT))
+                        or (cf & _F_DESC_CANDIDATE)
+                    )
+                ):
+                    f |= _F_DESC_CANDIDATE
+                if (
+                    cname in _BLOCK_CANDIDATE_TAGS
+                    or cname in _STRUCTURAL_BOUNDARY_TAGS
+                    or cname in _NON_PROSE_TAGS
+                    or (cname not in _ATOMIC_INLINE_TAGS and (cf & _F_DESC_ANY_BLOCK))
+                ):
+                    f |= _F_DESC_ANY_BLOCK
+                if (
+                    cname in _BLOCK_CANDIDATE_TAGS
+                    or cname in _STRUCTURAL_BOUNDARY_TAGS
+                    or cname in _NON_PROSE_TAGS
+                    or cname == "br"
+                    or (
+                        cname not in _ATOMIC_INLINE_TAGS
+                        and not is_internal_link
+                        and (cf & _F_DESC_SPLIT)
+                    )
+                    or (is_internal_link and (cf & _F_DESC_ANY_BLOCK))
+                ):
+                    f |= _F_DESC_SPLIT
+                if cname in _NON_PROSE_TAGS or (
+                    cname not in _ATOMIC_INLINE_TAGS and (cf & _F_DESC_NON_PROSE)
+                ):
+                    f |= _F_DESC_NON_PROSE
+        flags[id(node)] = f
+    return flags
+
+
+def _trim_inline_boundary_space(
+    node: Tag | NavigableString, *, leading: bool
+) -> tuple[str | None, str | None]:
+    if not _is_text_string(node):
+        return None, None
+    text = str(node)
+    trimmed = text.lstrip(_ASCII_WS) if leading else text.rstrip(_ASCII_WS)
+    ws_len = len(text) - len(trimmed)
+    if ws_len == 0:
+        return None, None
+    if leading:
+        return text[:ws_len], trimmed
+    return text[len(text) - ws_len :], trimmed
+
+
+def _inside_navigation_list(element: Tag) -> bool:
+    """Check whether a block belongs to an EPUB3 nav TOC list."""
+    inside_nav = False
+    inside_list_item = element.name == "li"
+    for parent in element.parents:
+        if not isinstance(parent, Tag):
+            continue
+        if parent.name == "li":
+            inside_list_item = True
+        elif parent.name == "nav":
+            inside_nav = True
+            break
+    return inside_nav and inside_list_item
+
+
+def _legacy_translation_targets(soup: BeautifulSoup, *, skip_navigation: bool) -> list[Tag]:
+    """Pre-schema-7 candidate-only target selection for backward-compatible testing/export."""
     targets: list[Tag] = []
     for element in soup.find_all(_BLOCK_CANDIDATE_TAGS):
         if skip_navigation and _inside_navigation_list(element):
             continue
-
         has_descendant_block = _has_meaningful_descendant_block(element)
         if element.name == "li":
             link = _list_item_link_target(element)
@@ -395,11 +573,177 @@ def _translation_targets(
                 targets.extend(_split_direct_break_lines(link, soup))
             if link is not None or has_descendant_block:
                 continue
-
         if has_descendant_block:
             continue
         targets.extend(_split_direct_break_lines(element, soup))
     return targets
+
+
+def _schema7_translation_targets(soup: BeautifulSoup, *, skip_navigation: bool) -> list[Tag]:
+    """Iteratively select replaceable targets in document order, including loose prose runs."""
+    flags = _compute_flags(soup)
+    targets: list[Tag] = []
+    # Work items are either ("emit", wrapper) or ("visit", node, in_nav, in_nav_li, loose_inline).
+    stack: list[tuple] = [("visit", soup, False, False, False)]
+    while stack:
+        item = stack.pop()
+        if item[0] == "emit":
+            targets.append(item[1])
+            continue
+
+        _, node, in_nav, in_nav_li, loose_inline = item
+        name = node.name if isinstance(node, Tag) else ""
+        if name in _NON_PROSE_TAGS or name in _ATOMIC_INLINE_TAGS:
+            continue
+        if name == "nav":
+            next_nav, next_nav_li = True, False
+        elif in_nav and name == "li":
+            next_nav, next_nav_li = True, True
+        else:
+            next_nav, next_nav_li = in_nav, in_nav_li
+        excluded = skip_navigation and next_nav_li
+        node_flags = flags.get(id(node), 0)
+
+        if isinstance(node, Tag) and name in _BLOCK_CANDIDATE_TAGS:
+            if name == "li":
+                link = node.find("a", recursive=False)
+                if isinstance(link, Tag):
+                    lf = flags.get(id(link), 0)
+                    valid_link = bool(lf & _F_TEXT) and all(
+                        child is link
+                        or (
+                            isinstance(child, Tag)
+                            and (
+                                child.name in _BLOCK_CANDIDATE_TAGS
+                                or child.name in {"ul", "ol", "dl"}
+                            )
+                        )
+                        or not (flags.get(id(child), 0) & _F_TEXT)
+                        for child in node.children
+                    )
+                    if valid_link:
+                        split_link = bool(lf & _F_DESC_ANY_BLOCK) or (
+                            bool(lf & _F_DESC_SPLIT) and not _is_note_link(link)
+                        )
+                        if not split_link and not excluded:
+                            targets.append(link)
+                        for child in reversed(list(node.children)):
+                            if child is link:
+                                if split_link:
+                                    stack.append(
+                                        ("visit", link, next_nav, next_nav_li, not excluded)
+                                    )
+                            elif isinstance(child, Tag):
+                                stack.append(("visit", child, next_nav, next_nav_li, False))
+                        continue
+            descend = (
+                bool(node_flags & _F_DESC_CANDIDATE)
+                or bool(node_flags & _F_DESC_NON_PROSE)
+                or (name in _LOOSE_TEXT_CONTAINERS and bool(node_flags & _F_DESC_SPLIT))
+            )
+            if not descend:
+                if not excluded:
+                    targets.extend(_split_direct_break_lines(node, soup))
+                continue
+
+        if not excluded and (
+            name in _LOOSE_TEXT_CONTAINERS
+            or loose_inline
+            or (name in _BLOCK_CANDIDATE_TAGS and bool(node_flags & _F_DESC_NON_PROSE))
+        ):
+            items: list[tuple] = []
+            run_buf: list[Tag | NavigableString] = []
+            prev_inline_split = loose_inline
+
+            def flush(*, trail_split: bool) -> None:
+                if not run_buf:
+                    return
+                if any(flags.get(id(n), 0) & _F_PROSE for n in run_buf):
+                    lead_ws: str | None = None
+                    trail_ws: str | None = None
+                    if prev_inline_split:
+                        lead_ws, trimmed = _trim_inline_boundary_space(run_buf[0], leading=True)
+                        if lead_ws is not None and trimmed is not None:
+                            if trimmed:
+                                replacement = soup.new_string(trimmed)
+                                run_buf[0].replace_with(replacement)
+                                run_buf[0] = replacement
+                            elif len(run_buf) > 1:
+                                run_buf.pop(0).extract()
+                    if trail_split:
+                        trail_ws, trimmed = _trim_inline_boundary_space(run_buf[-1], leading=False)
+                        if trail_ws is not None and trimmed is not None:
+                            if trimmed:
+                                replacement = soup.new_string(trimmed)
+                                run_buf[-1].replace_with(replacement)
+                                run_buf[-1] = replacement
+                            elif len(run_buf) > 1:
+                                run_buf.pop().extract()
+                    wrapper = soup.new_tag("span")
+                    wrapper[LINE_WRAPPER_ATTR] = "true"
+                    run_buf[0].insert_before(wrapper)
+                    if lead_ws is not None:
+                        wrapper.insert_before(soup.new_string(lead_ws))
+                    for elem in run_buf:
+                        wrapper.append(elem.extract())
+                    if trail_ws is not None:
+                        wrapper.insert_after(soup.new_string(trail_ws))
+                    items.append(("emit", wrapper))
+                run_buf.clear()
+
+            for child in list(node.children):
+                if isinstance(child, Tag):
+                    cname = child.name
+                    if cname == "br":
+                        flush(trail_split=False)
+                        prev_inline_split = False
+                    elif cname in _NON_PROSE_TAGS:
+                        flush(trail_split=True)
+                        prev_inline_split = True
+                    elif cname in _BLOCK_CANDIDATE_TAGS or cname in _STRUCTURAL_BOUNDARY_TAGS:
+                        flush(trail_split=False)
+                        items.append(("visit", child, next_nav, next_nav_li, False))
+                        prev_inline_split = False
+                    elif (
+                        cname not in _ATOMIC_INLINE_TAGS
+                        and not (
+                            cname == "a"
+                            and _is_internal_link(child)
+                            and not (flags.get(id(child), 0) & _F_DESC_ANY_BLOCK)
+                        )
+                        and (flags.get(id(child), 0) & _F_DESC_SPLIT)
+                    ):
+                        flush(trail_split=True)
+                        items.append(("visit", child, next_nav, next_nav_li, True))
+                        prev_inline_split = True
+                    else:
+                        run_buf.append(child)
+                elif _is_text_string(child):
+                    run_buf.append(child)
+            flush(trail_split=loose_inline)
+            for work in reversed(items):
+                stack.append(work)
+            continue
+
+        for child in reversed(list(node.children)):
+            if isinstance(child, Tag):
+                stack.append(("visit", child, next_nav, next_nav_li, False))
+    return targets
+
+
+def _translation_targets(
+    soup: BeautifulSoup,
+    *,
+    skip_navigation: bool,
+    extract_loose_text: bool = True,
+) -> list[Tag]:
+    """Select the finest safely replaceable EPUB nodes in document order.
+    Keep div/blockquote elements with child body blocks as containers, while extracting
+    loose inline/br-separated prose runs directly inside body or block containers.
+    """
+    if not extract_loose_text:
+        return _legacy_translation_targets(soup, skip_navigation=skip_navigation)
+    return _schema7_translation_targets(soup, skip_navigation=skip_navigation)
 
 
 def _looks_like_internal_title(title: str, href: str, book_title: str = "") -> bool:
@@ -419,6 +763,7 @@ def annotate_epub_resource(
     book_title: str = "",
     skip_navigation: bool = False,
     html_mode: bool = False,
+    extract_loose_text: bool = True,
 ) -> tuple[str, list[Segment], str]:
     """Annotate one physical XHTML and return its title, segments and backfill template.
     Use the physical resource index in anchors rather than the final Chapter index, so
@@ -432,6 +777,7 @@ def annotate_epub_resource(
         book_title=book_title,
         skip_navigation=skip_navigation,
         html_mode=html_mode,
+        extract_loose_text=extract_loose_text,
     )
     return title, segments, str(soup)
 
@@ -444,6 +790,7 @@ def annotate_resource_dom(
     book_title: str = "",
     skip_navigation: bool = False,
     html_mode: bool = False,
+    extract_loose_text: bool = True,
 ) -> tuple[str, list[Segment]]:
     """Annotate the caller's DOM in place, allowing export to backfill the same tree."""
     segments: list[Segment] = []
@@ -459,7 +806,11 @@ def annotate_resource_dom(
 
         targets = html_translation_targets(soup)
     else:
-        targets = _translation_targets(soup, skip_navigation=skip_navigation)
+        targets = _translation_targets(
+            soup,
+            skip_navigation=skip_navigation,
+            extract_loose_text=extract_loose_text,
+        )
     for el in targets:
         anchor = f"tn{resource_index}_{idx}"
         annotations = (
@@ -510,7 +861,9 @@ def annotate_resource_dom(
                 # HTML forbids nested anchors. Replace destinations inside range links with equivalent empty spans
                 # that preserve id/name without breaking the outer link.
                 inside_range_link = any(
-                    id(parent) in range_annotation_roots for parent in descendant.parents
+                    id(parent) in range_annotation_roots
+                    or (isinstance(parent, Tag) and parent.name == "a")
+                    for parent in descendant.parents
                 )
                 marker = soup.new_tag("span" if inside_range_link else "a")
                 marker.attrs.update(anchor_attrs)
@@ -568,22 +921,3 @@ def annotate_resource_dom(
             title = candidate
 
     return title, segments
-
-
-def _inside_navigation_list(element: Tag) -> bool:
-    """Check whether a block belongs to an EPUB3 nav TOC list.
-    Protect li elements and their internal blocks from backfill that would erase links or
-    nested ol elements. Visible headings or descriptions elsewhere inside nav still need
-    translation.
-    """
-    inside_nav = False
-    inside_list_item = element.name == "li"
-    for parent in element.parents:
-        if not isinstance(parent, Tag):
-            continue
-        if parent.name == "li":
-            inside_list_item = True
-        elif parent.name == "nav":
-            inside_nav = True
-            break
-    return inside_nav and inside_list_item
