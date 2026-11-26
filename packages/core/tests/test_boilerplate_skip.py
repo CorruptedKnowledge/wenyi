@@ -267,12 +267,6 @@ def test_mark_boilerplate_segments_is_noop_when_disabled(tmp_path):
     assert not doc.chapters[0].segments[0].meta.get("skip")
 
 
-def test_builtin_rules_never_skip_a_standalone_url_line():
-    from wenyi_core.ingest.boilerplate import match_boilerplate
-
-    assert match_boilerplate("https://example.org/articles/手机阅读更新") is None
-
-
 def test_parse_cache_key_tracks_builtin_boilerplate_rules():
     from wenyi_core.config import Config
     from wenyi_core.ingest.boilerplate import BUILTIN_RULES_VERSION

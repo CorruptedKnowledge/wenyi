@@ -107,7 +107,6 @@ _ZH_WATERMARK_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
-_STANDALONE_URL_RE = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
 # Bump when the built-in rules change so cached parses re-mark skipped segments.
 BUILTIN_RULES_VERSION = 2
 
@@ -148,10 +147,6 @@ def match_boilerplate(
             return f"custom:{index}"
 
     if not include_builtin or len(stripped) > _MAX_BUILTIN_LENGTH:
-        return None
-    # A line that is only a URL is a citation or link as often as a watermark, even when its
-    # path happens to contain promo words; custom patterns above can still match it.
-    if _STANDALONE_URL_RE.match(stripped):
         return None
 
     ad_match = _AD_BY_RE.match(stripped)
