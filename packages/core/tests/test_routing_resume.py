@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from wenyi_core.pipeline.orchestrator import Orchestrator
 from wenyi_core.pipeline.review.review_checkpoint import ReviewTraceStore
 from wenyi_core.pipeline.review.review_workflow import ReviewService
 from wenyi_core.pipeline.run.runtime import PipelineRuntime
+from wenyi_core.pipeline.translate.translation import POLISH_FAILED
 from wenyi_core.review.run_store import ReviewRunStore
 from wenyi_core.storage.file import FileStorage
 
@@ -204,7 +206,7 @@ def _review_with_absent_term(tmp_path, interrupted):
         nonlocal scans
         if "translation reviewer" in messages[0]["content"]:
             scans += 1
-            assert "Unused → 无关术语" in messages[-1]["content"]
+            assert "Unused → 无关术语" in messages[0]["content"]
             if interrupted and scans == 2:
                 raise KeyboardInterrupt("after the first full-glossary chunk")
         return routing_handler(messages, tier, json_mode)
@@ -239,7 +241,7 @@ def test_full_glossary_review_reuses_completed_results_and_pending_chunks(tmp_pa
     assert len(client.calls) == (1 if interrupted else 0)
     for call in client.calls:
         assert call["operation"] == "review.scan"
-        assert "Unused → 无关术语" in call["messages"][-1]["content"]
+        assert "Unused → 无关术语" in call["messages"][0]["content"]
         assert "翌日" in call["messages"][-1]["content"]
     usage = store.load_usage()
     assert usage is not None
@@ -294,7 +296,7 @@ def test_full_glossary_changes_invalidate_completed_and_interrupted_reviews(
     assert store.read_artifact(f"reviews/{review_id}/rounds/metadata.json") is not None
     assert store.load_chapter(0) == original_chapter
     for call in client.calls:
-        prompt = call["messages"][-1]["content"]
+        prompt = call["messages"][0]["content"]
         if change == "delete":
             assert "Unused →" not in prompt
         else:
@@ -436,23 +438,39 @@ def _polish_handler(stopping_after):
     return handler
 
 
+def _skip_extraction(orchestrator: Orchestrator):
+    """Stub batch, chapter and overlapped glossary extraction so only body calls are billed."""
+
+    def no_extraction(*_args, finish, **_kwargs):
+        finish({})
+        return {}
+
+    stack = ExitStack()
+    stack.enter_context(
+        patch.object(orchestrator._translation, "extract_batch_glossary", return_value={})
+    )
+    stack.enter_context(
+        patch.object(orchestrator._runtime.extractor, "extract_and_store", return_value={})
+    )
+    stack.enter_context(
+        patch.object(orchestrator._translation, "_extract", side_effect=no_extraction)
+    )
+    return stack
+
+
 def test_budget_exhaustion_in_polish_propagates_and_resume_bills_once(tmp_path):
-    """A budget stop inside the polisher aborts the run; resume replays only that batch."""
+    """A budget stop inside the polisher aborts the run; resume repolishes only that batch."""
     config = _polish_config(tmp_path)
     source = _polish_source(tmp_path)
     store = FileStorage(str(tmp_path / "run"))
     first_client = MeteredFakeClient(handler=_polish_handler(1))
     interrupted = Orchestrator(config, first_client, storage=store)
 
-    with (
-        patch.object(interrupted._translation, "extract_batch_glossary", return_value={}),
-        patch.object(interrupted._runtime.extractor, "extract_and_store", return_value={}),
-    ):
+    with _skip_extraction(interrupted):
         with pytest.raises(RequestStopped, match="budget exhausted"):
             interrupted.run(str(source))
 
-    # Every dispatched call stays on the ledger, including the aborted polish request;
-    # the second batch is incomplete, so its second segment is still untranslated.
+    # Every dispatched call stays on the ledger, including the aborted polish request.
     partial = store.load_usage()
     assert partial is not None
     assert partial["totals"]["calls"] == 5
@@ -462,31 +480,30 @@ def test_budget_exhaustion_in_polish_propagates_and_resume_bills_once(tmp_path):
         "translation.body": 2,
         "polish.body": 2,
     }
+    # The interrupted batch keeps its paid translation draft and is marked for repolishing.
     partial_chapter = store.load_chapter(0)
     assert partial_chapter.segments[0].target == "润0"
-    assert partial_chapter.segments[1].target is None
+    assert partial_chapter.segments[1].target == "译0"
+    assert partial_chapter.segments[1].meta.get(POLISH_FAILED) is True
 
     resumed_client = MeteredFakeClient(handler=routing_handler)
     resumed = Orchestrator(config, resumed_client, storage=store)
-    with (
-        patch.object(resumed._translation, "extract_batch_glossary", return_value={}),
-        patch.object(resumed._runtime.extractor, "extract_and_store", return_value={}),
-    ):
+    with _skip_extraction(resumed):
         result = require_file_storage(resumed.run(str(source)))
 
-    # Resume replays only the interrupted batch plus the final title pass; the completed
-    # analysis and first batch are never re-run, so each real call is billed exactly once.
+    # Resume repolishes only the interrupted batch plus the final title pass; the completed
+    # analysis and both translations are never re-run, so each real call is billed exactly once.
     resume_ops = sorted(row["operation"] for row in resumed_client.calls)
-    assert resume_ops == ["polish.body", "translation.body", "translation.title"]
+    assert resume_ops == ["polish.body", "translation.title"]
     chapter = result.load_chapter(0)
     assert [segment.target for segment in chapter.segments] == ["润0", "润0"]
     usage = result.load_usage()
     assert usage is not None
-    assert usage["totals"]["calls"] == 8
-    assert usage["totals"]["total_tokens"] == 8 * METERED_TOTAL_TOKENS
+    assert usage["totals"]["calls"] == 7
+    assert usage["totals"]["total_tokens"] == 7 * METERED_TOTAL_TOKENS
     assert {stage: row["calls"] for stage, row in usage["by_stage"].items()} == {
         "analysis.style": 1,
-        "translation.body": 3,
+        "translation.body": 2,
         "polish.body": 3,
         "translation.title": 1,
     }

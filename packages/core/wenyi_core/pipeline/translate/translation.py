@@ -32,13 +32,12 @@ from .glossary_notes import GlossaryNotes
 from .parallel_chapters import ParallelChapterRunner
 from .polish_queue import PolishOutcome, PolishQueue
 from .post_normalize import repair_escaped_newlines
-from .precision import PrecisionBatchExecutor, PrecisionError
+from .precision import PrecisionBatchExecutor, save_precision_batch
 from .seed_service import CjkGlossarySeedService
 from .title_translation import TitleTranslationService
 from .translation_batch import (
     BatchDraft,
     BatchPlan,
-    BatchResult,
     PolishJob,
     TranslationBatchExecutor,
     keep_nonempty_drafts,
@@ -347,7 +346,9 @@ class TranslationService:
             batch_start = seg_base
             glossary_key = store.batch_glossary_key(batch_start, len(b))
             if all(s.target is not None for s in b):
-                polish_pending = pipeline.polish and any(s.meta.get(POLISH_PENDING) for s in b)
+                polish_pending = pipeline.polish and any(
+                    s.meta.get(POLISH_PENDING) or s.meta.get(POLISH_FAILED) for s in b
+                )
                 self._align_batch_context(store, chapter, text_segs, batch_start, len(b))
                 if glossary_key in glossary_checkpoints or (
                     context_policy is not None
@@ -665,7 +666,9 @@ class TranslationService:
 
         applied = False
         for index, segment in enumerate(segments):
-            eligible = bool(segment.meta.pop(POLISH_PENDING, False))
+            eligible = bool(segment.meta.pop(POLISH_PENDING, False)) or bool(
+                segment.meta.get(POLISH_FAILED, False)
+            )
             if polished_targets is None:
                 if eligible:
                     segment.meta[POLISH_FAILED] = True
@@ -677,6 +680,7 @@ class TranslationService:
                 segment.target_before_polish is not None
                 and segment.target != segment.target_before_polish
             ):
+                segment.meta.pop(POLISH_FAILED, None)
                 continue
             segment.target = repair_escaped_newlines(segment.source, polished_targets[index])
             segment.meta.pop(POLISH_FAILED, None)
@@ -733,42 +737,7 @@ class TranslationService:
             chapter.index, chapter, start, count, store, segments=segments
         )
 
-    @staticmethod
-    def save_precision_batch(store: Storage, plan: BatchPlan, result: BatchResult) -> Chapter:
-        """Merge accepted pending segments into a fresh chapter without losing manual edits."""
-        with store.state_lock():
-            publication = PrecisionBatchExecutor.prepared_publication(store, result)
-            if (
-                publication.get("segment_indices") != list(plan.segment_indices)
-                or len(result.targets) != len(plan.sources)
-                or len(result.before_polish) != len(plan.sources)
-            ):
-                raise PrecisionError("The precision publication index is not aligned to its batch")
-            chapter = store.load_chapter(plan.chapter)
-            segments = chapter.text_segments[
-                plan.start_index : plan.start_index + len(plan.sources)
-            ]
-            if (
-                tuple(segment.index for segment in segments) != plan.segment_indices
-                or tuple(segment.source for segment in segments) != plan.sources
-            ):
-                raise PrecisionError("The precision batch source changed before publication")
-            for segment, target, before_polish in zip(
-                segments, result.targets, result.before_polish
-            ):
-                if segment.target is not None and (
-                    segment.target != target or segment.target_before_polish != before_polish
-                ):
-                    raise PrecisionError(
-                        "The precision batch was edited before publication; saved candidates are retained"
-                    )
-            for segment, target, before_polish in zip(
-                segments, result.targets, result.before_polish
-            ):
-                segment.target = target
-                segment.target_before_polish = before_polish
-            store.save_chapter(chapter)
-            return chapter
+    save_precision_batch = staticmethod(save_precision_batch)
 
     @staticmethod
     def chapter_progress_label(title: str, index: int) -> str:

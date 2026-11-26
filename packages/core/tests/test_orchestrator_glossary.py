@@ -57,8 +57,10 @@ class TestFullGlossary(unittest.TestCase):
                 self.assertIn("ホリキタ", p)
 
     def test_batch_glossary_refreshes_following_prompts(self):
-        """Extract terms after each batch so later prompts immediately receive new forms of
-        address.
+        """Extract terms after each batch so later prompts receive new forms of address.
+
+        The extraction overlaps the next batch's translation, so its entries reach the
+        batch after that.
         """
 
         def handler(messages, tier, json_mode):
@@ -96,7 +98,8 @@ class TestFullGlossary(unittest.TestCase):
             txt = os.path.join(d, "novel.txt")
             with open(txt, "w", encoding="utf-8") as f:
                 f.write(
-                    "# 第一章\n\n「夏帆ちゃん」と母親が言った。\n\n夏帆ちゃんは窓の外を見た。\n"
+                    "# 第一章\n\n「夏帆ちゃん」と母親が言った。\n\n夏帆ちゃんは窓の外を見た。\n\n"
+                    "夏帆ちゃんは笑った。\n"
                 )
             cfg = _config(os.path.join(d, "state"))
             cfg.pipeline.polish = False
@@ -112,8 +115,14 @@ class TestFullGlossary(unittest.TestCase):
                 for c in client.calls
                 if "literary translator" in c["messages"][0]["content"]
             ]
-            self.assertGreaterEqual(len(translate_prompts), 3)
-            self.assertIn("夏帆ちゃん → 小夏帆", translate_prompts[-1])
+            body = [
+                prompt
+                for prompt in translate_prompts
+                if "[0] " in prompt and "夏帆" in prompt.split("[0] ", 1)[1].split("\n", 1)[0]
+            ]
+            self.assertEqual(len(body), 3)
+            self.assertNotIn("夏帆ちゃん → 小夏帆", body[1])
+            self.assertIn("夏帆ちゃん → 小夏帆", body[2])
 
     def test_resume_recovers_batch_glossary_checkpoints_from_events(self):
         """Reuse extraction events for old state without duplicate model calls for completed
@@ -205,7 +214,7 @@ class TestFullGlossary(unittest.TestCase):
                     ensure_ascii=False,
                 )
             if "translation reviewer" in system:
-                self.assertIn("夏帆ちゃん → 小夏帆", user)
+                self.assertIn("夏帆ちゃん → 小夏帆", system)
                 return _review_json(user, [])
             return routing_handler(messages, tier, json_mode)
 

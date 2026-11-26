@@ -1,6 +1,7 @@
 import { useI18n } from "../../i18n";
 import { Label, Switch } from "../../components/ui/form";
-import { SettingsRow } from "./SettingsRow";
+import { Select, SelectItem } from "../../components/ui/select";
+import { SettingsRow, SETTINGS_CONTROL_CLASSNAME } from "./SettingsRow";
 import { cardSurface } from "../../components/ui/card";
 import { cn } from "../../lib/utils";
 
@@ -40,14 +41,27 @@ export function WorkflowSettings({
   const showStyle = scope === "project" && part !== "pipeline";
   const showPipeline = part !== "translation-style";
   const { t: tr } = useI18n();
+  const pipeline = section(config, "pipeline");
   const precision =
     scope === "project" &&
-    section(config, "pipeline").translation_mode === "three_draft_synthesis";
-  const PIPELINE: [string, string][] = [
-    ["book_understanding", tr("settings.bookUnderstanding")],
-    ["polish", tr("settings.polishing")],
-    ["review", tr("common.wholeBookReview")],
-    ["review_autofix", tr("settings.applyAutofixesToTheSavedTranslation")],
+    pipeline.translation_mode === "three_draft_synthesis";
+  const polishEnabled = Boolean(pipeline.polish);
+  const polishMode = pipeline.polish_mode === "sparse" ? "sparse" : "full";
+  const chapterConcurrencyNum = Number(pipeline.chapter_concurrency);
+  const chapterConcurrency =
+    Number.isInteger(chapterConcurrencyNum) && chapterConcurrencyNum >= 1
+      ? String(chapterConcurrencyNum)
+      : "1";
+  const chapterConcurrencyOptions = Array.from(
+    new Set(["1", "2", "4", "8", chapterConcurrency]),
+  ).sort((a, b) => Number(a) - Number(b));
+
+  const PIPELINE: [string, string, string | undefined][] = [
+    ["book_understanding", tr("settings.bookUnderstanding"), undefined],
+    ["polish", tr("settings.polishing"), undefined],
+    ["review", tr("common.wholeBookReview"), undefined],
+    ["review_autofix", tr("settings.applyAutofixesToTheSavedTranslation"), undefined],
+    ["skip_boilerplate", tr("settings.skipBoilerplate"), tr("settings.skipBoilerplateHelp")],
   ];
 
   return (
@@ -56,10 +70,6 @@ export function WorkflowSettings({
         <div className={cn(cardSurface, "p-4")}>
           <div className="space-y-2">
             <Label id="project-prompt-genre-label">{tr("settings.currentStyle")}</Label>
-            {/* A value, not a field. It is fixed at creation, so an input here
-                offered an editable-looking box that ignored every hover and every
-                keystroke; presenting it as plain text says the same thing without
-                promising interaction. */}
             <p
               id="project-prompt-genre"
               aria-labelledby="project-prompt-genre-label"
@@ -67,7 +77,7 @@ export function WorkflowSettings({
               className="cursor-not-allowed rounded-lg bg-surface px-3.5 py-2 text-sm text-muted-foreground"
             >
               {tr(
-                section(config, "pipeline").prompt_genre === "academic"
+                pipeline.prompt_genre === "academic"
                   ? "createProject.academicGenre"
                   : "createProject.literaryGenre",
               )}
@@ -78,23 +88,65 @@ export function WorkflowSettings({
           </div>
         </div>
       )}
-      {showPipeline && <div className={cn(cardSurface, "overflow-hidden")}>
-        {PIPELINE.map(([key, label]) => (
+      {showPipeline && (
+        <div className={cn(cardSurface, "overflow-hidden")}>
+          {PIPELINE.map(([key, label, help]) => (
+            <SettingsRow
+              key={key}
+              label={label}
+              description={help}
+              htmlFor={`pipeline-${key}`}
+              control={
+                <Switch
+                  id={`pipeline-${key}`}
+                  disabled={disabled || (key === "polish" && precision)}
+                  checked={Boolean(pipeline[key])}
+                  onCheckedChange={(checked) => onField("pipeline", key, checked)}
+                />
+              }
+            />
+          ))}
           <SettingsRow
-            key={key}
-            label={label}
-            htmlFor={`pipeline-${key}`}
+            label={tr("settings.polishMode")}
+            description={tr("settings.polishModeHelp")}
+            htmlFor="pipeline-polish_mode"
             control={
-              <Switch
-                id={`pipeline-${key}`}
-                disabled={disabled || (key === "polish" && precision)}
-                checked={Boolean(section(config, "pipeline")[key])}
-                onCheckedChange={(checked) => onField("pipeline", key, checked)}
-              />
+              <Select
+                id="pipeline-polish_mode"
+                value={polishMode}
+                disabled={disabled || !polishEnabled || precision}
+                onValueChange={(value) => onField("pipeline", "polish_mode", value)}
+                className={SETTINGS_CONTROL_CLASSNAME}
+              >
+                <SelectItem value="full">{tr("settings.polishModeFull")}</SelectItem>
+                <SelectItem value="sparse">{tr("settings.polishModeSparse")}</SelectItem>
+              </Select>
             }
           />
-        ))}
-      </div>}
+          <SettingsRow
+            label={tr("settings.chapterConcurrency")}
+            description={tr("settings.chapterConcurrencyHelp")}
+            htmlFor="pipeline-chapter_concurrency"
+            control={
+              <Select
+                id="pipeline-chapter_concurrency"
+                value={chapterConcurrency}
+                disabled={disabled || precision}
+                onValueChange={(value) =>
+                  onField("pipeline", "chapter_concurrency", Number(value))
+                }
+                className={SETTINGS_CONTROL_CLASSNAME}
+              >
+                {chapterConcurrencyOptions.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {option}
+                  </SelectItem>
+                ))}
+              </Select>
+            }
+          />
+        </div>
+      )}
     </fieldset>
   );
 }

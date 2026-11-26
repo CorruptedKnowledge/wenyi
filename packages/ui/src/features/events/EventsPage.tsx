@@ -34,6 +34,10 @@ function badgeFor(type: string) {
       variant: "secondary",
       label: tr("common.terms"),
     },
+    cjk_glossary_seeded: {
+      variant: "secondary",
+      label: tr("common.terms"),
+    },
     assembled: { variant: "success", label: tr("common.export") },
   };
 
@@ -85,6 +89,8 @@ function describe(e: EventOut): string {
       });
     case "run_initialized":
       return tr("events.projectInitializedChapters", { count: p.chapters });
+    case "cjk_glossary_seeded":
+      return tr("events.cjkGlossarySeeded", { seeded: p.seeded ?? 0 });
     default:
       return e.type;
   }

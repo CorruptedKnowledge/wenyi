@@ -30,6 +30,11 @@ class TranslationMode(str, Enum):
     three_draft_synthesis = "three_draft_synthesis"
 
 
+class PolishMode(str, Enum):
+    full = "full"
+    sparse = "sparse"
+
+
 def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> None:
     @app.command(rich_help_panel="Main workflow")
     def mineru_epub(
@@ -91,6 +96,8 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
         fmt: str | None = None,
         out: str | None = None,
         polish: bool | None = None,
+        polish_mode: PolishMode | None = None,
+        chapter_concurrency: int | None = None,
         translation_mode: TranslationMode | None = None,
         review: bool | None = None,
         mono: bool | None = None,
@@ -117,6 +124,8 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
                 fmt=fmt,
                 out=out,
                 polish=polish,
+                polish_mode=polish_mode,
+                chapter_concurrency=chapter_concurrency,
                 translation_mode=translation_mode,
                 review=review,
                 mono=mono,
@@ -145,6 +154,8 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
         fmt: str | None = None,
         out: str | None = None,
         polish: bool | None = None,
+        polish_mode: PolishMode | None = None,
+        chapter_concurrency: int | None = None,
         translation_mode: TranslationMode | None = None,
         review: bool | None = None,
         mono: bool | None = None,
@@ -161,6 +172,10 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
         pipeline_values = config.pipeline.model_dump()
         if polish is not None:
             pipeline_values["polish"] = polish
+        if polish_mode is not None:
+            pipeline_values["polish_mode"] = polish_mode.value
+        if chapter_concurrency is not None:
+            pipeline_values["chapter_concurrency"] = chapter_concurrency
         if translation_mode is not None:
             pipeline_values["translation_mode"] = translation_mode.value
         try:
@@ -329,6 +344,18 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
             "--polish/--no-polish",
             help="Override pipeline.polish to enable or disable polishing",
         ),
+        polish_mode: PolishMode | None = typer.Option(
+            None,
+            "--polish-mode",
+            help="Override pipeline.polish_mode: full or sparse",
+        ),
+        chapter_concurrency: int | None = typer.Option(
+            None,
+            "--chapter-concurrency",
+            min=1,
+            max=16,
+            help="Override pipeline.chapter_concurrency (1 = serial; >1 seeds CJK glossary and runs chapters concurrently)",
+        ),
         translation_mode: TranslationMode | None = typer.Option(
             None,
             "--translation-mode",
@@ -368,6 +395,8 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
             fmt=fmt,
             out=out,
             polish=polish,
+            polish_mode=polish_mode,
+            chapter_concurrency=chapter_concurrency,
             translation_mode=translation_mode,
             review=review,
             mono=mono,

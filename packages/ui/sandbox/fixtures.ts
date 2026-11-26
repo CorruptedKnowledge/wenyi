@@ -126,10 +126,16 @@ export const effective = {
   },
   segment: { max_tokens_per_batch: 1800, max_tokens_per_segment: 1200 },
   pipeline: {
+    batch_glossary: "all",
+    glossary_mode: "incremental",
+    polish_mode: "full",
+    chapter_concurrency: 1,
     book_understanding: true,
     polish: true,
     review: true,
     review_autofix: true,
+    consistency_sweep: false,
+    deterministic_hygiene: true,
     annotation_alignment: true,
     review_concurrency: 4,
     pdf_backend: "mineru",
@@ -189,6 +195,8 @@ export const preview = {
     { index: 1, title: "Two", word_count: 400 },
     { index: 2, title: "Three", word_count: 400 },
   ],
+  skipped_boilerplate_count: 0,
+  skipped_boilerplate: [],
 } satisfies Output<"UploadPreview">;
 
 function tableData(): Record<string, unknown> {
