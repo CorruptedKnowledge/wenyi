@@ -63,7 +63,7 @@ for (const theme of ["light", "dark"]) {
     for (const scope of ["global", "project"]) {
       await page.goto(scope === "global" ? "/settings/workflow" : `/projects/${pid}/settings`);
       const main = page.getByRole("main");
-      await expect(main.getByRole("region", { name: "Workflow", exact: true }).getByRole("switch")).toHaveCount(4);
+      await expect(main.getByRole("region", { name: "Workflow", exact: true }).getByRole("switch")).toHaveCount(5);
       await expect(main.getByRole("checkbox")).toHaveCount(0);
       for (const [key, name] of [
         ["book_understanding", "Book understanding"],
@@ -419,7 +419,7 @@ for (const chinese of [false, true]) {
     await page.setViewportSize({ width: 1024, height: 768 });
     await page.goto("/settings/workflow");
     const main = page.getByRole("main");
-    await expect(main.getByRole("switch")).toHaveCount(4);
+    await expect(main.getByRole("switch")).toHaveCount(5);
     const workflow = main.getByRole("region", { name: chinese ? "翻译流程" : "Workflow", exact: true });
     await expect(workflow.getByRole("spinbutton", { includeHidden: true })).toHaveCount(0);
     await expect(page.getByLabel(chinese ? "逐段注释定位" : "Paragraph annotation alignment", { exact: true })).toHaveCount(0);
@@ -455,8 +455,8 @@ for (const chinese of [false, true]) {
     const yaml = page.getByRole("textbox", { name: advancedName, exact: true });
     await expect(yaml).toBeVisible();
     await expect(page.getByRole("link", { name: advancedName, exact: true })).toHaveCount(0);
-    await expect(main.getByRole("combobox")).toHaveCount(7);
-    await expect(main.getByRole("switch")).toHaveCount(6);
+    await expect(main.getByRole("combobox")).toHaveCount(9);
+    await expect(main.getByRole("switch")).toHaveCount(7);
     await expect(main.getByRole("spinbutton", { includeHidden: true })).toHaveCount(0);
     await expect(page.getByLabel(chinese ? "分批翻译章节" : "Translate chapters in batches", { exact: true })).toHaveCount(0);
     await expect(main.locator("details, summary")).toHaveCount(0);
@@ -771,7 +771,7 @@ test("running projects keep both basic and advanced settings read-only", async (
   await page.goto(`/projects/${pid}/settings`);
   await expect(page.locator('[id="route-translation.body"]')).toBeDisabled();
   const switches = page.getByRole("main").getByRole("switch");
-  await expect(switches).toHaveCount(6);
+  await expect(switches).toHaveCount(7);
   for (const control of await switches.all()) {
     await expect(control).toBeDisabled();
   }

@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import json
+import os
 
 from wenyi_core.agents.polisher import Polisher
 from wenyi_core.agents.sparse_editor import SparseSemanticEditor, _apply_validated_patches
 from wenyi_core.agents.translator import Translator
 from wenyi_core.config import Config
 from wenyi_core.models.glossary import GlossaryTerm
+from wenyi_core.pipeline.orchestrator import Orchestrator
 from wenyi_core.pipeline.translate.post_normalize import repair_escaped_newlines
-from wenyi_core.pipeline.translate.translation_batch import BatchPlan, TranslationBatchExecutor
+from wenyi_core.pipeline.translate.translation_batch import (
+    POLISH_FAILED,
+    BatchPlan,
+    TranslationBatchExecutor,
+)
+from wenyi_core.storage.run_store import STATUS_DONE
 
-from tests.fake_llm import FakeClient
+from tests.fake_llm import FakeClient, MeteredFakeClient, routing_handler
+from tests.pipeline_fixtures import fake_pipeline_config, require_file_storage
 
 
 def _zh_en_config() -> Config:
@@ -150,3 +158,67 @@ def test_repair_escaped_newlines_preserves_source_literals_code_urls_and_markers
         )
         == "Before `a\\nb` https://ex.com/\\n 〘object:a\\nb〙 end\nnext"
     )
+
+
+def test_serial_resume_recovers_polish_after_escaped_newline_repair_and_done_unpolished(tmp_path):
+    book = "第一章 启程\n\n第一行\n第二行\n"
+    src_path = tmp_path / "escaped_resume.txt"
+    src_path.write_text(book, encoding="utf-8")
+
+    cfg = fake_pipeline_config(os.path.join(tmp_path, "state"))
+    cfg.source_lang = "zh"
+    cfg.target_lang = "en"
+    cfg.pipeline.review = False
+    cfg.pipeline.polish = True
+    cfg.pipeline.polish_mode = "sparse"
+    cfg.pipeline.book_understanding = False
+    cfg.pipeline.chapter_concurrency = 1
+    cfg.pipeline.polish_concurrency = 1
+
+    fail_polish = True
+    translate_calls = 0
+
+    def handler(messages, tier, json_mode):
+        nonlocal translate_calls
+        if tier == "translation.body":
+            translate_calls += 1
+            n = len(json.loads(routing_handler(messages, tier, json_mode))["translations"])
+            # Model leaks literal \n when source has real newline.
+            return json.dumps({"translations": ["Line 1\\nLine 2"] * n})
+        if tier == "polish.body":
+            if fail_polish:
+                # Non-resumable malformed output -> chapter finishes marked unpolished.
+                return "not valid json"
+            return json.dumps(
+                {"patches": [{"index": 0, "text": "Polished Line 1\nLine 2", "reason": "flow"}]}
+            )
+        return routing_handler(messages, tier, json_mode)
+
+    orch = Orchestrator(cfg, client=MeteredFakeClient(handler=handler))
+    store = require_file_storage(orch.prepare(str(src_path)))
+    orch.run(str(src_path))
+
+    # Chapter finished STATUS_DONE with unpolished=True and repaired target/target_before_polish.
+    ch = store.load_chapter(0)
+    seg = ch.text_segments[0]
+    assert seg.target == "Line 1\nLine 2"
+    assert seg.target_before_polish == "Line 1\nLine 2"
+    assert seg.meta.get(POLISH_FAILED) is True
+    manifest = store.load_manifest()
+    assert manifest["chapters"][0]["status"] == STATUS_DONE
+    assert manifest["chapters"][0].get("unpolished") is True
+
+    # Simulate an older upgraded project where target_before_polish still holds raw literal \n.
+    seg.target_before_polish = "Line 1\\nLine 2"
+    store.save_chapter(ch)
+
+    # Resume must pick up the done+unpolished chapter, recognize normalized draft equality,
+    # apply the recovered polish, and clear unpolished without retranslating.
+    fail_polish = False
+    orch.run(str(src_path))
+
+    assert translate_calls == 1
+    ch_after = store.load_chapter(0)
+    assert ch_after.text_segments[0].target == "Polished Line 1\nLine 2"
+    assert ch_after.text_segments[0].meta.get(POLISH_FAILED) is None
+    assert not store.load_manifest()["chapters"][0].get("unpolished")

@@ -10,6 +10,7 @@ Pure agent module: zero pipeline or storage imports.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import re
 from collections import Counter
@@ -23,7 +24,13 @@ from ..i18n.languages import (
     glossary_generic_target_words,
 )
 from ..llm.json_parser import JsonParseError
-from ..llm.retrying import TruncatedResponseError, is_resumable_provider_interrupt
+from ..llm.preflight import fit_prompt_to_context_window
+from ..llm.retrying import (
+    ProviderRequestError,
+    TruncatedResponseError,
+    error_status_code,
+    is_resumable_provider_interrupt,
+)
 from . import prompts
 from .base import Agent
 
@@ -31,6 +38,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Contiguous CJK ideograph runs and katakana runs (for future JA support).
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
+_PURE_CJK_RE = re.compile(r"^[\u4e00-\u9fff]+$")
 _KATAKANA_RE = re.compile(r"[\u30a1-\u30fa\u30fc]{2,12}")
 # Titles/techniques/factions explicitly marked in CJK brackets.
 _BRACKETED_RE = re.compile(r"[《「『【]([^》」』】\n]{2,12})[》」』】]")
@@ -40,6 +48,7 @@ _VALID_TYPES = frozenset({"person", "place", "organization", "term"})
 _GENERIC_SINGLE_WORD_RE = re.compile(r"[A-Za-z]+")
 _SNIPPET_RADIUS = 36
 _CHUNK_SIZE = 60
+_DIRECT_COUNT_THRESHOLD = 250
 
 
 @dataclass(frozen=True)
@@ -49,6 +58,14 @@ class SeedCandidate:
     source: str
     count: int
     snippet: str
+
+
+@dataclass(frozen=True)
+class SeedResult:
+    """Result of upfront CJK glossary seeding, including whether all chunks succeeded cleanly."""
+
+    terms: list[GlossaryTerm]
+    complete: bool = True
 
 
 def _first_snippet(corpus: str, term: str) -> str:
@@ -73,6 +90,50 @@ def _bounded_sample_texts(
     return [source_corpus[i * step : i * step + slice_chars] for i in range(max_slices)]
 
 
+def _count_candidates_in_corpus(source_corpus: str, candidates: set[str]) -> dict[str, int]:
+    """Count corpus occurrences in O(N) for large candidate sets without repeated full scans."""
+    cjk_by_len: dict[int, set[str]] = {}
+    other_cands: list[str] = []
+    for tok in candidates:
+        tlen = len(tok)
+        if _NGRAM_MIN <= tlen <= _NGRAM_MAX and _PURE_CJK_RE.match(tok):
+            cjk_by_len.setdefault(tlen, set()).add(tok)
+        else:
+            other_cands.append(tok)
+
+    counts: dict[str, int] = {}
+    cjk_total = sum(len(bucket) for bucket in cjk_by_len.values())
+    if cjk_total <= _DIRECT_COUNT_THRESHOLD:
+        for bucket in cjk_by_len.values():
+            for tok in bucket:
+                freq = source_corpus.count(tok)
+                if freq >= 2:
+                    counts[tok] = freq
+    elif cjk_by_len:
+        # Single linear scan over contiguous CJK runs checks only active candidate lengths.
+        active_buckets = tuple(sorted(cjk_by_len.items()))
+        hit_counts: Counter[str] = Counter()
+        for run_match in _CJK_RUN_RE.finditer(source_corpus):
+            run = run_match.group(0)
+            run_len = len(run)
+            for size, bucket in active_buckets:
+                if run_len < size:
+                    break
+                for start in range(0, run_len - size + 1):
+                    sub = run[start : start + size]
+                    if sub in bucket:
+                        hit_counts[sub] += 1
+        for tok, freq in hit_counts.items():
+            if freq >= 2:
+                counts[tok] = freq
+
+    for tok in other_cands:
+        freq = source_corpus.count(tok)
+        if freq >= 2:
+            counts[tok] = freq
+    return counts
+
+
 def mine_cjk_candidates(
     digests: Sequence[str],
     source_corpus: str,
@@ -86,12 +147,13 @@ def mine_cjk_candidates(
     Reads chapter digests first (high proper-noun density); if digests are absent, falls
     back to evenly spaced slices of ``source_corpus``. Requires >= 2 corpus occurrences,
     drops context-dependent forms and existing entries, and suppresses substrings shadowed
-    >= 80% by a longer compound.
+    >= 80% by a longer compound in O(M) time.
     """
     if not source_corpus:
         return []
     mining_texts = [d for d in digests if d and d.strip()]
-    if not mining_texts:
+    used_fallback_samples = not mining_texts
+    if used_fallback_samples:
         mining_texts = _bounded_sample_texts(source_corpus)
 
     raw_hits: Counter[str] = Counter()
@@ -103,7 +165,7 @@ def mine_cjk_candidates(
         for m in _KATAKANA_RE.finditer(text):
             raw_hits[m.group(0)] += 1
         # Chinese has no spaces between words: mine 2..5 char sliding CJK n-grams inside
-        # each hanzi run, then validate exact recurrence against the full corpus.
+        # each hanzi run, then validate recurrence against the full corpus.
         for run_match in _CJK_RUN_RE.finditer(text):
             run = run_match.group(0)
             run_len = len(run)
@@ -111,43 +173,67 @@ def mine_cjk_candidates(
                 for start in range(0, run_len - size + 1):
                     raw_hits[run[start : start + size]] += 1
 
-    # Count exact occurrences in the full source corpus and filter noise.
-    counts: dict[str, int] = {}
-    for token in raw_hits:
-        if token in existing_sources or token in context_dependent_sources:
-            continue
-        freq = source_corpus.count(token)
-        if freq >= 2:
-            counts[token] = freq
+    excluded = existing_sources | context_dependent_sources
+    for tok in list(raw_hits):
+        if tok in excluded:
+            del raw_hits[tok]
 
+    raw_cap = max(max_candidates * 10, 4800)
+    if len(raw_hits) > raw_cap:
+        # In large books/fallback samples, keep the highest-recurrence raw candidates.
+        ranked_raw = sorted(raw_hits, key=lambda s: (-raw_hits[s], -len(s), s))[:raw_cap]
+        candidate_set = set(ranked_raw)
+    else:
+        candidate_set = set(raw_hits)
+
+    if not candidate_set:
+        return []
+
+    counts = _count_candidates_in_corpus(source_corpus, candidate_set)
     if not counts:
         return []
 
-    # Drop shorter substrings shadowed >= 80% by a longer mined compound, and drop any
-    # longer compound that is merely a superstring of an existing term with identical count.
+    # Drop shorter substrings shadowed >= 80% by a longer mined compound in O(M) using
+    # a parent-count table over proper substrings (tokens are bounded at <= 12 chars).
     by_length_desc = sorted(counts, key=lambda s: (-len(s), -counts[s], s))
     kept: list[str] = []
+    max_parent_count: dict[str, int] = {}
     for token in by_length_desc:
         freq = counts[token]
-        shadowed = any(
-            len(longer) > len(token) and token in longer and counts[longer] * 5 >= freq * 4
-            for longer in kept
-        )
-        if not shadowed:
-            kept.append(token)
+        if max_parent_count.get(token, 0) * 5 >= freq * 4:
+            continue
+        kept.append(token)
+        tlen = len(token)
+        for sub_len in range(_NGRAM_MIN, tlen):
+            for i in range(tlen - sub_len + 1):
+                sub = token[i : i + sub_len]
+                if sub in counts and freq > max_parent_count.get(sub, 0):
+                    max_parent_count[sub] = freq
 
-    # Also drop substrings shadowed >= 80% by an already-existing glossary source.
-    existing_counts = {
-        src: source_corpus.count(src) for src in existing_sources if len(src) > _NGRAM_MIN
-    }
-    kept = [
-        tok
-        for tok in kept
-        if not any(
-            len(ex) > len(tok) and tok in ex and ex_cnt * 5 >= counts[tok] * 4
-            for ex, ex_cnt in existing_counts.items()
-        )
-    ]
+    # Also drop substrings shadowed >= 80% by an already-existing glossary source in O(M).
+    kept_set = set(kept)
+    if kept_set and existing_sources:
+        max_kept_len = max(len(tok) for tok in kept_set)
+        existing_parent: dict[str, int] = {}
+        for ex in existing_sources:
+            ex_len = len(ex)
+            if ex_len <= _NGRAM_MIN:
+                continue
+            matched_subs: list[str] = []
+            upper = min(ex_len, max_kept_len + 1)
+            for sub_len in range(_NGRAM_MIN, upper):
+                for i in range(ex_len - sub_len + 1):
+                    sub = ex[i : i + sub_len]
+                    if sub in kept_set:
+                        matched_subs.append(sub)
+            if not matched_subs:
+                continue
+            ex_cnt = source_corpus.count(ex)
+            for sub in matched_subs:
+                if ex_cnt > existing_parent.get(sub, 0):
+                    existing_parent[sub] = ex_cnt
+        if existing_parent:
+            kept = [tok for tok in kept if existing_parent.get(tok, 0) * 5 < counts[tok] * 4]
 
     # Rank by corpus frequency descending (tie-break deterministically by token).
     kept.sort(key=lambda s: (-counts[s], -len(s), s))
@@ -171,21 +257,51 @@ class CjkGlossarySeeder(Agent):
         max_workers: int = 4,
     ) -> list[GlossaryTerm]:
         """Adjudicate mined CJK candidates into canonical terms in parallel chunks."""
-        if not candidates:
-            return []
+        return self.seed_result(
+            candidates,
+            book_synopsis=book_synopsis,
+            style=style,
+            existing_terms=existing_terms,
+            max_workers=max_workers,
+        ).terms
 
-        system_prompt = self._build_system_prompt(book_synopsis, style, existing_terms)
+    def seed_result(
+        self,
+        candidates: Sequence[SeedCandidate],
+        *,
+        book_synopsis: str = "",
+        style: str = "",
+        existing_terms: Sequence[GlossaryTerm] = (),
+        max_workers: int = 4,
+    ) -> SeedResult:
+        """Adjudicate mined CJK candidates and report whether all chunks succeeded cleanly."""
+        if not candidates:
+            return SeedResult([], complete=True)
+
         chunks = [
             list(candidates[i : i + _CHUNK_SIZE]) for i in range(0, len(candidates), _CHUNK_SIZE)
         ]
 
         workers = min(max(1, max_workers), len(chunks))
         if workers <= 1:
-            chunk_results = [self._adjudicate_chunk(system_prompt, chunk) for chunk in chunks]
+            chunk_outcomes = [
+                self._adjudicate_chunk(book_synopsis, style, existing_terms, chunk)
+                for chunk in chunks
+            ]
         else:
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wenyi-cjk-seed") as ex:
-                futures = [ex.submit(self._adjudicate_chunk, system_prompt, ch) for ch in chunks]
-                chunk_results = [fut.result() for fut in futures]
+                futures = [
+                    ex.submit(
+                        contextvars.copy_context().run,
+                        self._adjudicate_chunk,
+                        book_synopsis,
+                        style,
+                        existing_terms,
+                        ch,
+                    )
+                    for ch in chunks
+                ]
+                chunk_outcomes = [fut.result() for fut in futures]
 
         context_sources = glossary_context_dependent_sources(self.src)
         generic_words = glossary_generic_target_words(self.tgt)
@@ -193,7 +309,10 @@ class CjkGlossarySeeder(Agent):
 
         merged: list[GlossaryTerm] = []
         seen: set[str] = set()
-        for batch in chunk_results:
+        complete = True
+        for batch, ok in chunk_outcomes:
+            if not ok:
+                complete = False
             for term in batch:
                 if (
                     term.source in seen
@@ -205,7 +324,7 @@ class CjkGlossarySeeder(Agent):
                     continue
                 seen.add(term.source)
                 merged.append(term)
-        return merged
+        return SeedResult(merged, complete=complete)
 
     def _build_system_prompt(
         self,
@@ -248,9 +367,11 @@ class CjkGlossarySeeder(Agent):
 
     def _adjudicate_chunk(
         self,
-        system_prompt: str,
+        book_synopsis: str,
+        style: str,
+        existing_terms: Sequence[GlossaryTerm],
         chunk: Sequence[SeedCandidate],
-    ) -> list[GlossaryTerm]:
+    ) -> tuple[list[GlossaryTerm], bool]:
         lines = [
             f"- {c.source} (x{c.count}): {c.snippet}" if c.snippet else f"- {c.source} (x{c.count})"
             for c in chunk
@@ -260,27 +381,42 @@ class CjkGlossarySeeder(Agent):
             + "\n".join(lines)
             + '\n\nReturn JSON {"terms":[...]} keeping only true proper nouns and key world terms.'
         )
+        match_text = "\n".join(c.snippet or c.source for c in chunk)
+        system_prompt, user_msg, _effective, _shrunk = fit_prompt_to_context_window(
+            config=self.config,
+            operation="glossary.extract",
+            terms=list(existing_terms),
+            match_text=match_text,
+            render_messages=lambda terms_for_prompt: (
+                self._build_system_prompt(book_synopsis, style, terms_for_prompt),
+                user_prompt,
+            ),
+        )
         try:
             data, _raw = self._complete_json_turn(
                 [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": user_msg},
                 ],
                 operation="glossary.extract",
                 require_complete_payload=True,
             )
         except (JsonParseError, TruncatedResponseError, ValueError) as exc:
             _LOGGER.warning("CJK glossary seed chunk failed (%s); skipping chunk", exc)
-            return []
+            return [], False
+        except ProviderRequestError:
+            # Propagate both resumable outages and fatal 4xx config/auth errors.
+            raise
         except Exception as exc:
-            if is_resumable_provider_interrupt(exc):
+            status = error_status_code(exc)
+            if is_resumable_provider_interrupt(exc) or (status is not None and 400 <= status < 500):
                 raise
             _LOGGER.warning("CJK glossary seed chunk error (%s); skipping chunk", exc)
-            return []
+            return [], False
 
         raw_terms = data.get("terms") if isinstance(data, dict) else None
         if not isinstance(raw_terms, list):
-            return []
+            return [], False
 
         allowed_sources = {c.source for c in chunk}
         out: list[GlossaryTerm] = []
@@ -311,7 +447,7 @@ class CjkGlossarySeeder(Agent):
                     first_chapter=0,
                 )
             )
-        return out
+        return out, True
 
     @staticmethod
     def _is_generic_non_person(term: GlossaryTerm, generic_words: frozenset[str]) -> bool:
@@ -326,4 +462,10 @@ class CjkGlossarySeeder(Agent):
         return all(w.casefold() in generic_words for w in words)
 
 
-__all__ = ["CjkGlossarySeeder", "GlossaryStore", "SeedCandidate", "mine_cjk_candidates"]
+__all__ = [
+    "CjkGlossarySeeder",
+    "GlossaryStore",
+    "SeedCandidate",
+    "SeedResult",
+    "mine_cjk_candidates",
+]

@@ -29,13 +29,15 @@ from .babeldoc_context import BabeldocContext
 from .context import following_chapter_source, recent_chapter_context
 from .extraction_queue import ExtractionQueue
 from .glossary_notes import GlossaryNotes
-from .parallel_chapters import ParallelChapterRunner
+from .parallel_chapters import ParallelChapterRunner, publish_chapter_status
 from .polish_queue import PolishOutcome, PolishQueue
 from .post_normalize import repair_escaped_newlines
 from .precision import PrecisionBatchExecutor, save_precision_batch
 from .seed_service import CjkGlossarySeedService
 from .title_translation import TitleTranslationService
 from .translation_batch import (
+    POLISH_FAILED,
+    POLISH_PENDING,
     BatchDraft,
     BatchPlan,
     PolishJob,
@@ -49,8 +51,6 @@ if TYPE_CHECKING:
     from ..run.runtime import PipelineRuntime
 
 _LOGGER = logging.getLogger(__name__)
-POLISH_PENDING = "polish_pending"
-POLISH_FAILED = "polish_failed"
 
 
 class TranslationService:
@@ -99,6 +99,19 @@ class TranslationService:
             targets = progress_chapters = [only_chapter]
         else:
             targets = store.pending_chapters()
+            if pipeline.polish and pipeline.translation_mode == "standard":
+                unpolished = {
+                    row["index"]
+                    for row in manifest.get("chapters", [])
+                    if row.get("unpolished") and row["index"] not in targets
+                }
+                if unpolished:
+                    needed = set(targets) | unpolished
+                    targets = [
+                        row["index"]
+                        for row in manifest.get("chapters", [])
+                        if row["index"] in needed
+                    ]
             progress_chapters = [chapter["index"] for chapter in manifest.get("chapters", [])]
 
         total, done = self.progress_counts(store, progress_chapters)
@@ -493,7 +506,11 @@ class TranslationService:
                 )
                 for segment, target, before_polish in zip(b, result.targets, result.before_polish):
                     segment.target = repair_escaped_newlines(segment.source, target)
-                    segment.target_before_polish = before_polish
+                    segment.target_before_polish = (
+                        repair_escaped_newlines(segment.source, before_polish)
+                        if before_polish is not None
+                        else None
+                    )
                     segment.meta.pop(POLISH_PENDING, None)
                     if result.polish_failed and pipeline.polish:
                         segment.meta[POLISH_FAILED] = True
@@ -616,12 +633,11 @@ class TranslationService:
         """Publish a finished chapter after all its extraction and polish work has settled."""
         chapter = self._open_chapters.pop(ci, None) or store.load_chapter(ci)
         self._awaiting_polish.discard(ci)
-        store.save_chapter_with_status(chapter, STATUS_DONE)
-        store.log_event(
-            "chapter_done",
-            chapter=ci,
-            title=chapter.title,
-            segment_count=len(chapter.text_segments),
+        pipeline = self._runtime.config.pipeline
+        publish_chapter_status(
+            store,
+            chapter,
+            polish=pipeline.polish and pipeline.translation_mode == "standard",
         )
 
     def _schedule_polish(self, store: Storage, job: PolishJob) -> None:
@@ -676,10 +692,12 @@ class TranslationService:
             if not eligible:
                 continue
             # Only update segments still holding their saved draft; preserve manual edits.
-            if (
-                segment.target_before_polish is not None
-                and segment.target != segment.target_before_polish
-            ):
+            norm_before = (
+                repair_escaped_newlines(segment.source, segment.target_before_polish)
+                if segment.target_before_polish is not None
+                else None
+            )
+            if norm_before is not None and segment.target != norm_before:
                 segment.meta.pop(POLISH_FAILED, None)
                 continue
             segment.target = repair_escaped_newlines(segment.source, polished_targets[index])

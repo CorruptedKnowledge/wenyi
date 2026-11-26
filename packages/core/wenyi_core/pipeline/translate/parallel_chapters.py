@@ -25,7 +25,16 @@ from ...storage.run_store import STATUS_DONE
 from .babeldoc_context import BabeldocContext
 from .context import render_recent_translations
 from .post_normalize import repair_escaped_newlines
-from .translation_batch import BatchPlan, BatchResult, TranslationBatchExecutor
+from .translation_batch import (
+    POLISH_FAILED,
+    POLISH_PENDING,
+    BatchDraft,
+    BatchPlan,
+    BatchResult,
+    PolishJob,
+    TranslationBatchExecutor,
+    keep_nonempty_drafts,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +47,8 @@ class _ChapterBatchSpec:
     body_context: bool
     already_done: bool
     existing_targets: tuple[str | None, ...]
+    existing_before_polish: tuple[str | None, ...] = ()
+    needs_repolish: bool = False
 
 
 @dataclass(frozen=True)
@@ -58,6 +69,7 @@ class _BatchOutcome:
     batch_start: int
     sources: tuple[str, ...]
     result: BatchResult
+    repolish_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -70,6 +82,48 @@ class _ChapterOutcome:
 
 def _stops_run(exc: BaseException) -> bool:
     return not isinstance(exc, Exception) or is_resumable_provider_interrupt(exc)
+
+
+def publish_chapter_status(store: Storage, chapter: Chapter, *, polish: bool) -> None:
+    """Persist ``STATUS_DONE`` and synchronize the chapter/manifest ``unpolished`` retry flag."""
+    ci = chapter.index
+    text_segs = chapter.text_segments
+    if not polish:
+        for seg in text_segs:
+            seg.meta.pop(POLISH_PENDING, None)
+            seg.meta.pop(POLISH_FAILED, None)
+    unpolished = polish and any(
+        seg.meta.get(POLISH_FAILED) or seg.meta.get(POLISH_PENDING) for seg in text_segs
+    )
+    if unpolished:
+        chapter.meta["unpolished"] = True
+        # Write the manifest retry marker before marking the chapter done so an interrupt
+        # between the two writes never leaves an unpolished chapter silently skipped.
+        with store.state_lock():
+            manifest = store.load_manifest()
+            for row in manifest.get("chapters", []):
+                if row.get("index") == ci and not row.get("unpolished"):
+                    row["unpolished"] = True
+                    store.save_manifest(manifest)
+                    break
+    else:
+        chapter.meta.pop("unpolished", None)
+    store.save_chapter_with_status(chapter, STATUS_DONE)
+    if not unpolished:
+        with store.state_lock():
+            manifest = store.load_manifest()
+            for row in manifest.get("chapters", []):
+                if row.get("index") == ci and row.get("unpolished"):
+                    row.pop("unpolished", None)
+                    store.save_manifest(manifest)
+                    break
+    store.log_event(
+        "chapter_done",
+        chapter=ci,
+        title=chapter.title,
+        segment_count=len(text_segs),
+        **({"unpolished": True} if unpolished else {}),
+    )
 
 
 def _source_lookbehind(prev_chapter: Chapter | None, budget_tokens: int) -> str:
@@ -158,11 +212,21 @@ class ParallelChapterRunner:
                     next_ch_first = next_segs[0].source
 
             batch_specs: list[_ChapterBatchSpec] = []
+            cleared_stale_polish = False
             seg_base = 0
             for b in batches:
                 end = seg_base + len(b)
                 body_ctx = policy is None or policy.body[seg_base]
                 already_done = all(s.target is not None for s in b)
+                marked = already_done and any(
+                    s.meta.get(POLISH_PENDING) or s.meta.get(POLISH_FAILED) for s in b
+                )
+                needs_repolish = marked and polish
+                if marked and not polish:
+                    for s in b:
+                        s.meta.pop(POLISH_PENDING, None)
+                        s.meta.pop(POLISH_FAILED, None)
+                    cleared_stale_polish = True
                 if already_done:
                     align_existing.setdefault(ci, []).append((seg_base, len(b)))
                 next_src = ""
@@ -181,9 +245,13 @@ class ParallelChapterRunner:
                         body_context=body_ctx,
                         already_done=already_done,
                         existing_targets=tuple(s.target for s in b),
+                        existing_before_polish=tuple(s.target_before_polish for s in b),
+                        needs_repolish=needs_repolish,
                     )
                 )
                 seg_base = end
+            if cleared_stale_polish:
+                store.save_chapter(chapter)
 
             specs.append(
                 _ChapterSpec(
@@ -231,12 +299,14 @@ class ParallelChapterRunner:
                     if not in_flight:
                         break
                     finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
-                    # Flush completed chapters in deterministic chapter-index order.
+                    # Persist all completed chapters in deterministic chapter-index order BEFORE
+                    # invoking progress(), which may raise PauseRequested (KeyboardInterrupt).
                     ready: list[_ChapterOutcome] = []
                     for fut in finished:
                         in_flight.pop(fut)
                         ready.append(fut.result())
                     ready.sort(key=lambda item: item.chapter)
+                    last_label: str | None = None
                     for outcome in ready:
                         done = self._apply_chapter_outcome(
                             store,
@@ -244,18 +314,47 @@ class ParallelChapterRunner:
                             outcome,
                             align_existing.get(outcome.chapter, ()),
                             polish=polish,
-                            progress=progress,
                             done=done,
-                            total=total,
+                        )
+                        last_label = self._progress_label(
+                            chapters_by_id[outcome.chapter].title, outcome.chapter
                         )
                         if outcome.error is not None:
                             stop.set()
                             if first_error is None:
                                 first_error = outcome.error
+                    if (
+                        progress is not None
+                        and last_label is not None
+                        and first_error is None
+                        and not stop.is_set()
+                    ):
+                        progress(done, total, last_label)
             except BaseException:
+                # Signal workers to stop, cancel unstarted futures, and persist any completed
+                # batches from already-running workers so paid work is never discarded on Pause.
                 stop.set()
-                for fut in in_flight:
-                    fut.cancel()
+                running_futs: list[Future[_ChapterOutcome]] = []
+                for fut in list(in_flight):
+                    if not fut.cancel():
+                        running_futs.append(fut)
+                in_flight.clear()
+                drained: list[_ChapterOutcome] = []
+                for fut in running_futs:
+                    try:
+                        drained.append(fut.result())
+                    except BaseException:  # noqa: BLE001 - best-effort drain on interruption.
+                        pass
+                drained.sort(key=lambda item: item.chapter)
+                for outcome in drained:
+                    done = self._apply_chapter_outcome(
+                        store,
+                        chapters_by_id[outcome.chapter],
+                        outcome,
+                        align_existing.get(outcome.chapter, ()),
+                        polish=polish,
+                        done=done,
+                    )
                 raise
 
         if first_error is not None:
@@ -277,9 +376,62 @@ class ParallelChapterRunner:
 
         for bspec in spec.batches:
             if bspec.already_done:
+                if not bspec.needs_repolish:
+                    if bspec.body_context:
+                        wave_drafts.extend(t or "" for t in bspec.existing_targets)
+                    continue
+                if stop.is_set():
+                    stopped_early = True
+                    break
+                draft_targets = tuple(
+                    bp if bp is not None else (tgt or "")
+                    for bp, tgt in zip(bspec.existing_before_polish, bspec.existing_targets)
+                )
+                job = PolishJob(
+                    spec.chapter,
+                    bspec.batch_start,
+                    bspec.segment_indices,
+                    bspec.sources,
+                    spec.terms,
+                    spec.style,
+                    bspec.next_source,
+                    BatchDraft(draft_targets),
+                )
+                try:
+                    raw_polished = self._batches.polish(job, polish_mode=polish_mode)
+                except BaseException as exc:  # noqa: BLE001 - preserve prior batches on stop.
+                    if _stops_run(exc):
+                        error = exc
+                        break
+                    raw_polished = None
+
+                if raw_polished is not None and len(raw_polished) == len(draft_targets):
+                    kept_targets, empty_reverted = keep_nonempty_drafts(draft_targets, raw_polished)
+                    cleaned = tuple(
+                        repair_escaped_newlines(src, tgt)
+                        for src, tgt in zip(bspec.sources, kept_targets)
+                    )
+                    repolish_res = BatchResult(
+                        cleaned,
+                        bspec.existing_before_polish,
+                        polish_failed=False,
+                        polish_empty_reverted=empty_reverted,
+                    )
+                else:
+                    repolish_res = BatchResult(
+                        tuple(t or "" for t in bspec.existing_targets),
+                        bspec.existing_before_polish,
+                        polish_failed=True,
+                    )
+                outcomes.append(
+                    _BatchOutcome(
+                        bspec.batch_start, bspec.sources, repolish_res, repolish_only=True
+                    )
+                )
                 if bspec.body_context:
-                    wave_drafts.extend(t or "" for t in bspec.existing_targets)
+                    wave_drafts.extend(repolish_res.targets)
                 continue
+
             if stop.is_set():
                 stopped_early = True
                 break
@@ -316,9 +468,13 @@ class ParallelChapterRunner:
             cleaned = tuple(
                 repair_escaped_newlines(src, tgt) for src, tgt in zip(bspec.sources, result.targets)
             )
+            cleaned_before = tuple(
+                repair_escaped_newlines(src, bp) if bp is not None else None
+                for src, bp in zip(bspec.sources, result.before_polish)
+            )
             result = BatchResult(
                 cleaned,
-                result.before_polish,
+                cleaned_before,
                 precision_key=result.precision_key,
                 polish_failed=result.polish_failed,
                 polish_empty_reverted=result.polish_empty_reverted,
@@ -342,14 +498,11 @@ class ParallelChapterRunner:
         existing_batches: list[tuple[int, int]] | tuple[tuple[int, int], ...],
         *,
         polish: bool,
-        progress: ProgressFn | None,
         done: int,
-        total: int,
     ) -> int:
         """Persist one worker's completed batches on the main writer thread."""
         ci = outcome.chapter
         text_segs = chapter.text_segments
-        label = self._progress_label(chapter.title, ci)
 
         for start, count in existing_batches:
             self._align_batch(store, chapter, text_segs, start, count)
@@ -357,13 +510,93 @@ class ParallelChapterRunner:
         for item in outcome.batches:
             count = len(item.sources)
             batch_segs = text_segs[item.batch_start : item.batch_start + count]
+            if item.repolish_only:
+                applied = False
+                for seg, target in zip(batch_segs, item.result.targets):
+                    eligible = bool(seg.meta.pop(POLISH_PENDING, False)) or bool(
+                        seg.meta.get(POLISH_FAILED, False)
+                    )
+                    if item.result.polish_failed:
+                        if eligible:
+                            seg.meta[POLISH_FAILED] = True
+                        continue
+                    if not eligible:
+                        continue
+                    norm_bp = (
+                        repair_escaped_newlines(seg.source, seg.target_before_polish)
+                        if seg.target_before_polish is not None
+                        else None
+                    )
+                    if norm_bp is not None and seg.target != norm_bp:
+                        seg.meta.pop(POLISH_FAILED, None)
+                        continue
+                    seg.target = target
+                    seg.meta.pop(POLISH_FAILED, None)
+                    applied = True
+                store.save_chapter(chapter)
+                if item.result.polish_empty_reverted:
+                    store.log_event(
+                        "batch_polish_empty_kept",
+                        chapter=ci,
+                        start_index=item.batch_start,
+                        count=count,
+                        reverted_indices=list(item.result.polish_empty_reverted),
+                    )
+                if applied or not item.result.polish_failed:
+                    if applied:
+                        self._align_batch(store, chapter, text_segs, item.batch_start, count)
+                    store.log_event(
+                        "batch_polished",
+                        chapter=ci,
+                        start_index=item.batch_start,
+                        count=count,
+                    )
+                else:
+                    store.log_event(
+                        "batch_polish_failed",
+                        chapter=ci,
+                        start_index=item.batch_start,
+                        count=count,
+                        reason="misaligned_output",
+                    )
+                continue
+
             for seg, target, before_polish in zip(
                 batch_segs, item.result.targets, item.result.before_polish
             ):
                 seg.target = target
                 seg.target_before_polish = before_polish
+                seg.meta.pop(POLISH_PENDING, None)
+                if polish and item.result.polish_failed:
+                    seg.meta[POLISH_FAILED] = True
+                else:
+                    seg.meta.pop(POLISH_FAILED, None)
             store.save_chapter(chapter)
             self._align_batch(store, chapter, text_segs, item.batch_start, count)
+            if item.result.polish_empty_reverted:
+                store.log_event(
+                    "batch_polish_empty_kept",
+                    chapter=ci,
+                    start_index=item.batch_start,
+                    count=count,
+                    reverted_indices=list(item.result.polish_empty_reverted),
+                )
+            if item.result.polish_interrupted is not None:
+                store.log_event(
+                    "batch_polish_failed",
+                    chapter=ci,
+                    start_index=item.batch_start,
+                    count=count,
+                    reason="provider_interrupted",
+                )
+            elif item.result.polish_failed:
+                store.log_event(
+                    "batch_polish_failed",
+                    chapter=ci,
+                    start_index=item.batch_start,
+                    count=count,
+                    reason="misaligned_output",
+                )
             store.log_event(
                 "batch_translated",
                 chapter=ci,
@@ -377,16 +610,8 @@ class ParallelChapterRunner:
                 ],
             )
             done += count
-            if progress:
-                progress(done, total, label)
 
         if outcome.completed:
-            store.save_chapter_with_status(chapter, STATUS_DONE)
-            store.log_event(
-                "chapter_done",
-                chapter=ci,
-                title=chapter.title,
-                segment_count=len(text_segs),
-            )
+            publish_chapter_status(store, chapter, polish=polish)
         self._flush_usage(store, "chapter")
         return done

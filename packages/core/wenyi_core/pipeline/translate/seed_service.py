@@ -17,7 +17,7 @@ from ...agents.cjk_seed import CjkGlossarySeeder, mine_cjk_candidates
 from ...events import ProgressFn
 from ...i18n.languages import glossary_context_dependent_sources
 from ...llm.routing import inference_snapshot
-from ...models.glossary import GlossaryTerm
+from ...models.glossary import TYPE_NAVIGATION, GlossaryTerm
 from ...storage.protocol import Storage
 
 if TYPE_CHECKING:
@@ -51,8 +51,11 @@ class CjkGlossarySeedService:
         self._seeder.language_policy = self._runtime.config.language_policy("translation")
 
         existing_all = store.all_terms()
-        # Only user-owned entries (first_chapter is None) define the immutable seed fingerprint.
-        user_terms = [t for t in existing_all if t.first_chapter is None]
+        # Only user-owned non-navigation entries (first_chapter is None) define the seed prefix
+        # and cache fingerprint; EPUB chapter titles stay scoped to matching batches.
+        user_terms = [
+            t for t in existing_all if t.first_chapter is None and t.type != TYPE_NAVIGATION
+        ]
         fingerprint = self._fingerprint(store, digests, book_synopsis, style, user_terms)
 
         cached = store.read_artifact(SEED_ARTIFACT_KEY)
@@ -62,9 +65,15 @@ class CjkGlossarySeedService:
             and cached.get("fingerprint") == fingerprint
             and isinstance(cached.get("terms"), list)
         ):
+            # Once published, never re-insert on subsequent runs so user-deleted seed terms
+            # remain deleted instead of resurrecting on resume.
+            if cached.get("published") is True:
+                return 0
             terms = [self._deserialize_term(item) for item in cached["terms"]]
             terms = [t for t in terms if t is not None]
-            return self._publish_idempotent(store, terms)
+            published = self._publish_idempotent(store, terms)
+            store.write_artifact(SEED_ARTIFACT_KEY, {**cached, "published": True})
+            return published
 
         if progress:
             progress(0, 1, "progress.stage.seedingGlossary")
@@ -76,7 +85,7 @@ class CjkGlossarySeedService:
             existing_sources={t.source for t in user_terms},
             context_dependent_sources=context_sources,
         )
-        seeded = self._seeder.seed(
+        result = self._seeder.seed_result(
             candidates,
             book_synopsis=book_synopsis,
             style=style,
@@ -86,22 +95,29 @@ class CjkGlossarySeedService:
         if checkpoint_usage is not None:
             checkpoint_usage()
 
-        # Persist the paid seed artifact before publishing into SQLite so an interrupt
-        # during publication resumes with zero extra LLM calls.
-        store.write_artifact(
-            SEED_ARTIFACT_KEY,
-            {
+        seeded = result.terms
+        if result.complete:
+            # Persist the paid seed artifact before publishing into SQLite so an interrupt
+            # during publication resumes with zero extra LLM calls, then mark it published.
+            artifact = {
                 "version": _SEED_SCHEMA_VERSION,
                 "fingerprint": fingerprint,
                 "terms": [self._serialize_term(t) for t in seeded],
-            },
-        )
-        published = self._publish_idempotent(store, seeded)
+                "published": False,
+            }
+            store.write_artifact(SEED_ARTIFACT_KEY, artifact)
+            published = self._publish_idempotent(store, seeded)
+            store.write_artifact(SEED_ARTIFACT_KEY, {**artifact, "published": True})
+        else:
+            # Partial chunk failures still publish valid terms but skip caching so the next
+            # resume retries the missing chunks instead of freezing an empty/partial seed.
+            published = self._publish_idempotent(store, seeded)
         store.log_event(
             "cjk_glossary_seeded",
             candidates=len(candidates),
             seeded=len(seeded),
             published=published,
+            complete=result.complete,
         )
         return published
 

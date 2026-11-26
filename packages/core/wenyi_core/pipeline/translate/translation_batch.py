@@ -16,6 +16,9 @@ from ...markup.ruby import strip_ruby_markers
 from ...models.document import Segment
 from ...models.glossary import GlossaryTerm
 
+POLISH_PENDING = "polish_pending"
+POLISH_FAILED = "polish_failed"
+
 
 @dataclass(frozen=True)
 class BatchPlan:

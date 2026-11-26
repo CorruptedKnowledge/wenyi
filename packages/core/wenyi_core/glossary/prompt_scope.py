@@ -99,30 +99,32 @@ def fit_terms_to_budget(
     *,
     max_tokens: int,
 ) -> list[GlossaryTerm]:
-    """Hard-cap ``terms`` to fit within ``max_tokens``, keeping a stable leading prefix
-    first when possible and prioritizing matched entries when space is tight.
+    """Hard-cap ``terms`` to fit within ``max_tokens``, preserving the append-stable
+    leading non-navigation prefix first for KV cache stability and filling remaining room
+    with matched overflow/navigation entries.
     """
     if not terms or max_tokens <= 0:
         return []
-    matched_ids = {id(term) for term in GlossaryStore.terms_in(terms, text)} if text else set()
     chosen_ids: set[int] = set()
     spent = 0
-    # Pass 1: prioritize entries occurring in the request text (including matching nav titles).
+    # Pass 1: preserve the append-stable leading non-navigation prefix so batches under
+    # preflight trimming still share a byte-identical system prefix.
     for term in terms:
-        if id(term) not in matched_ids:
-            continue
-        cost = estimate_term_tokens(term)
-        if spent + cost > max_tokens:
-            continue
-        chosen_ids.add(id(term))
-        spent += cost
-    # Pass 2: fill any remaining budget from the append-stable leading non-navigation prefix.
-    for term in terms:
-        if id(term) in chosen_ids or term.type == TYPE_NAVIGATION:
+        if term.type == TYPE_NAVIGATION:
             continue
         cost = estimate_term_tokens(term)
         if spent + cost > max_tokens:
             break
         chosen_ids.add(id(term))
         spent += cost
+    # Pass 2: fill any remaining budget with entries occurring in the request text
+    # (matched overflow entities and matching navigation titles).
+    if spent < max_tokens and text:
+        remaining = [term for term in terms if id(term) not in chosen_ids]
+        for term in GlossaryStore.terms_in(remaining, text):
+            cost = estimate_term_tokens(term)
+            if spent + cost > max_tokens:
+                continue
+            chosen_ids.add(id(term))
+            spent += cost
     return [term for term in terms if id(term) in chosen_ids]
