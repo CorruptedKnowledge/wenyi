@@ -576,7 +576,7 @@ class ConsistencySweepService:
             and t.type in {"person", "place", "organization", "term"}
             and len(t.source.strip()) >= 2
             and len(t.target.strip()) >= 2
-            and not _is_generic(t.target, generic_words)
+            and not _is_generic(t.target, generic_words, t.type)
         ]
 
         drifted_items: list[tuple[Chapter, Segment, GlossaryTerm]] = []

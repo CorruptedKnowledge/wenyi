@@ -183,7 +183,9 @@ conflict; glossary imports and manual edits still compare exactly.
 Two further checks need no word list for the source language. When translating into
 English, an extracted entry whose translation is only pronouns and title words ("I",
 "your son", "Your Excellency") is not stored, while "Lord Jiang" keeps its name and
-stays. During translation, an extracted entry that the finished translation keeps
+stays, and so does a person, place or organization whose translation is one capitalized
+word, such as a character named "Grace". The Book Bible, the polish pre-screen and the
+consistency sweep apply the same rule. During translation, an extracted entry that the finished translation keeps
 overriding is left out of later translation and polish prompts. Counting starts at the
 earliest draft paragraph, in book order, that uses its stored translation, so paragraphs
 earlier in the book than a corrected translation's first use do not count against it; once its source has appeared in

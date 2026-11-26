@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from ..glossary.store import STATUS_OK, normalize_match_text, source_matches_normalized
+from ..glossary.targets import is_generic_target
 from ..i18n.languages import glossary_generic_target_words, inline_gloss_markers
 from ..ingest.segmenter import verse_block_indices
 from ..models.glossary import GlossaryTerm
@@ -223,11 +224,8 @@ def _target_contains_term(
 
 
 @lru_cache(maxsize=1 << 14)
-def _is_generic(text: str, generic_words: frozenset[str]) -> bool:
-    if not generic_words:
-        return False
-    words = _WORD_RE.findall(text.casefold())
-    return bool(words) and all(w.replace("’", "'") in generic_words for w in words)
+def _is_generic(text: str, generic_words: frozenset[str], term_type: str | None = None) -> bool:
+    return is_generic_target(text, generic_words, term_type=term_type)
 
 
 def has_embedded_verse(source: str, *, source_lang: str) -> bool:
@@ -291,7 +289,7 @@ def assess_batch_risk(
         and t.type in {"person", "place", "organization", "term"}
         and len(t.source.strip()) >= 2
         and len(t.target.strip()) >= 2
-        and not _is_generic(t.target, generic_words)
+        and not _is_generic(t.target, generic_words, t.type)
     ]
 
     para_srcs = [raw_src.strip() for raw_src in sources]

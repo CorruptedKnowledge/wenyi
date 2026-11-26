@@ -26,6 +26,8 @@ from ..glossary.store import (
     source_occurrence_spans,
     term_match_sources,
 )
+from ..glossary.targets import NAME_TYPES as _NAME_TYPES
+from ..glossary.targets import is_generic_target
 from ..i18n.languages import (
     glossary_context_dependent_sources,
     glossary_generic_target_words,
@@ -196,9 +198,6 @@ def _filter_shadowed_sources(
     return filtered
 
 
-_NAME_TYPES = frozenset({"person", "place", "organization"})
-
-
 def _has_uppercase(text: str) -> bool:
     return any(char.isupper() for char in text)
 
@@ -252,34 +251,19 @@ def _filter_context_dependent_sources(
     return filtered
 
 
-_WORD = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
-
-
-def _is_generic_target(target: str, generic_words: frozenset[str]) -> bool:
-    """Return True when every word of a target is a pronoun or a title word.
-
-    "I", "your son", "this commoner" and "Your Excellency" name nobody in particular, while
-    "Lord Jiang" or "Prince of Yong" keep a name and stay. Cased and spaced scripts only:
-    a target without such words, such as Chinese, is never generic.
-    """
-    words = _WORD.findall(normalize_match_text(target))
-    return bool(words) and all(word.replace("’", "'") in generic_words for word in words)
-
-
 def _filter_generic_targets(
     terms: list[GlossaryTerm], generic_words: frozenset[str]
 ) -> list[GlossaryTerm]:
-    """Drop extractions whose target is only pronouns and generic titles (target profile)."""
+    """Drop extractions whose target is only pronouns and generic titles (target profile).
+
+    "I", "your son", "this commoner" and "Your Excellency" name nobody in particular, while
+    "Lord Jiang" keeps a name and a person called "Grace" is a name (see ``is_generic_target``).
+    """
     if not generic_words:
         return terms
 
     def generic(term: GlossaryTerm) -> bool:
-        words = _WORD.findall(term.target)
-        # A one-word capitalized name such as "Grace" or "King" is a person, not a title.
-        if term.type in _NAME_TYPES and len(words) == 1 and len(words[0]) > 1:
-            if words[0][0].isupper():
-                return False
-        return _is_generic_target(term.target, generic_words)
+        return is_generic_target(term.target, generic_words, term_type=term.type)
 
     kept = [term for term in terms if not generic(term)]
     if len(kept) < len(terms):
