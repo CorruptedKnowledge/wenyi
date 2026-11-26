@@ -1,13 +1,17 @@
-"""Explicit batch inputs and translate/polish results without formal state mutation."""
+"""Batch planning and execution for body translation without state I/O."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 
+from ...agents.base import Messages
 from ...agents.polisher import Polisher
+from ...agents.sparse_editor import SparseSemanticEditor
 from ...agents.translator import Translator
 from ...ingest.segmenter import batch_segments
+from ...llm.retrying import is_resumable_provider_interrupt
 from ...markup.ruby import strip_ruby_markers
 from ...models.document import Segment
 from ...models.glossary import GlossaryTerm
@@ -15,7 +19,7 @@ from ...models.glossary import GlossaryTerm
 
 @dataclass(frozen=True)
 class BatchPlan:
-    """Capture the source positions and context used for exactly one serial batch."""
+    """Immutable inputs captured on the chapter thread before calling models."""
 
     chapter: int
     start_index: int
@@ -50,8 +54,8 @@ class BatchPlan:
         return cls(
             chapter,
             start_index,
-            tuple(s.index for s in segments),
-            tuple(s.source for s in segments),
+            tuple(segment.index for segment in segments),
+            tuple(segment.source for segment in segments),
             tuple(deepcopy(terms)),
             context,
             style,
@@ -65,22 +69,126 @@ class BatchPlan:
 
 @dataclass(frozen=True)
 class BatchResult:
+    """Aligned model outputs returned to the chapter service for persistence."""
+
     targets: tuple[str, ...]
     before_polish: tuple[str | None, ...]
     precision_key: str | None = None
+    polish_failed: bool = False
+    polish_empty_reverted: tuple[int, ...] = ()
+    polish_interrupted: BaseException | None = None
+
+
+def keep_nonempty_drafts(
+    drafts: Sequence[str], polished: Sequence[str]
+) -> tuple[list[str], tuple[int, ...]]:
+    """Never let polish blank a non-empty draft; keep the draft and record reverted indices."""
+    cleaned: list[str] = []
+    reverted: list[int] = []
+    for index, (draft, item) in enumerate(zip(drafts, polished)):
+        if draft.strip() and not item.strip():
+            cleaned.append(draft)
+            reverted.append(index)
+        else:
+            cleaned.append(item)
+    return cleaned, tuple(reverted)
+
+
+@dataclass(frozen=True)
+class BatchDraft:
+    """An unpolished batch translation plus the transcript a polish call may continue."""
+
+    targets: tuple[str, ...]
+    turn: Messages | None = None
+    turn_indices: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True)
+class PolishJob:
+    """Detached inputs for polishing one saved draft, possibly on another thread."""
+
+    chapter: int
+    start_index: int
+    segment_indices: tuple[int, ...]
+    sources: tuple[str, ...]
+    terms: tuple[GlossaryTerm, ...]
+    style: str
+    next_source: str
+    draft: BatchDraft
+
+    @classmethod
+    def from_plan(cls, plan: BatchPlan, draft: BatchDraft) -> PolishJob:
+        return cls(
+            plan.chapter,
+            plan.start_index,
+            plan.segment_indices,
+            plan.sources,
+            plan.terms,
+            plan.style,
+            plan.next_source,
+            draft,
+        )
 
 
 class TranslationBatchExecutor:
-    def __init__(self, translator: Translator, polisher: Polisher):
+    def __init__(
+        self,
+        translator: Translator,
+        polisher: Polisher,
+        sparse_editor: SparseSemanticEditor | None = None,
+    ):
         self._translator = translator
         self._polisher = polisher
+        self._sparse_editor = sparse_editor
 
-    def execute(self, plan: BatchPlan, *, polish: bool) -> BatchResult:
+    def execute(
+        self,
+        plan: BatchPlan,
+        *,
+        polish: bool,
+        polish_mode: str = "full",
+    ) -> BatchResult:
         """Translate and optionally polish; the chapter service alone applies the result."""
-        terms = list(plan.terms)
-        targets = self._translator.translate_batch(
+        draft = self.translate(plan)
+        targets = list(draft.targets)
+        before_polish: tuple[str | None, ...] = (None,) * len(targets)
+        polish_failed = False
+        polish_empty_reverted: tuple[int, ...] = ()
+        polish_interrupted: BaseException | None = None
+        if polish:
+            before_polish = tuple(targets)
+            try:
+                polished = self._run_polish(
+                    draft,
+                    sources=plan.sources,
+                    terms=plan.terms,
+                    style=plan.style,
+                    next_source=plan.next_source,
+                    polish_mode=polish_mode,
+                )
+            except BaseException as exc:  # noqa: BLE001 - budget/cancel stops must still save the draft.
+                if isinstance(exc, Exception) and not is_resumable_provider_interrupt(exc):
+                    raise
+                polish_failed = True
+                polish_interrupted = exc
+            else:
+                if polished is not None and len(polished) == len(targets):
+                    targets, polish_empty_reverted = keep_nonempty_drafts(targets, polished)
+                else:
+                    polish_failed = True
+        return BatchResult(
+            tuple(targets),
+            before_polish,
+            polish_failed=polish_failed,
+            polish_empty_reverted=polish_empty_reverted,
+            polish_interrupted=polish_interrupted,
+        )
+
+    def translate(self, plan: BatchPlan) -> BatchDraft:
+        """Translate one batch thread-safely and return its per-call transcript."""
+        targets, turn, indices = self._translator.translate_batch_with_transcript(
             list(plan.sources),
-            glossary_terms=terms,
+            glossary_terms=list(plan.terms),
             style=plan.style,
             context=plan.context,
             book_synopsis=plan.book_synopsis,
@@ -89,35 +197,96 @@ class TranslationBatchExecutor:
             next_source=plan.next_source,
             allow_empty_translations=plan.allow_empty_translations,
         )
-        targets = [strip_ruby_markers(target) for target in targets]
-        before_polish: tuple[str | None, ...] = (None,) * len(targets)
-        if polish:
-            before_polish = tuple(targets)
-            turn = self._translator.last_batch_turn
-            indices = self._translator.last_batch_indices
-            polished: list[str] | None = None
-            if turn is not None and indices is not None:
-                # Continue the translation conversation and restore filtered source positions.
-                continued = self._polisher.polish_continue(
-                    turn,
-                    n=len(indices),
-                    next_source=plan.next_source,
-                )
-                if continued is not None and len(continued) == len(indices):
-                    polished = list(targets)
-                    for index, text in zip(indices, continued):
-                        polished[index] = strip_ruby_markers(text)
-            if polished is None:
-                polished = self._polisher.polish(
-                    targets,
-                    glossary_terms=terms,
-                    style=plan.style,
-                    next_source=plan.next_source,
-                    sources=list(plan.sources),
-                )
-            if len(polished) == len(targets):
-                targets = polished
-        return BatchResult(tuple(targets), before_polish)
+        cleaned_targets = [strip_ruby_markers(target) for target in targets]
+        return BatchDraft(
+            tuple(cleaned_targets),
+            turn if turn is not None and indices is not None else None,
+            tuple(indices) if turn is not None and indices is not None else None,
+        )
+
+    def polish(self, job: PolishJob, *, polish_mode: str = "full") -> tuple[str, ...] | None:
+        """Polish a saved draft without touching state; ``None`` keeps the draft."""
+        polished = self._run_polish(
+            job.draft,
+            sources=job.sources,
+            terms=job.terms,
+            style=job.style,
+            next_source=job.next_source,
+            polish_mode=polish_mode,
+        )
+        if polished is None or len(polished) != len(job.draft.targets):
+            return None
+        return tuple(polished)
+
+    def _run_polish(
+        self,
+        draft: BatchDraft,
+        *,
+        sources: Sequence[str],
+        terms: Sequence[GlossaryTerm],
+        style: str,
+        next_source: str,
+        polish_mode: str,
+    ) -> list[str] | None:
+        if polish_mode == "sparse" and self._sparse_editor is not None:
+            continued = self._continue_sparse_polish(draft, next_source)
+            if continued is not None:
+                return continued
+            sparse = self._sparse_editor.edit_batch(
+                sources,
+                draft.targets,
+                glossary_terms=terms,
+                style=style,
+                next_source=next_source,
+            )
+            if sparse.failed or len(sparse.targets) != len(draft.targets):
+                return None
+            return [strip_ruby_markers(item) for item in sparse.targets]
+        polished = self._continue_polish(draft, next_source)
+        if polished is None:
+            polished = self._polisher.polish_or_none(
+                list(draft.targets),
+                glossary_terms=list(terms),
+                style=style,
+                next_source=next_source,
+                sources=list(sources),
+            )
+        return polished
+
+    def _continue_sparse_polish(self, draft: BatchDraft, next_source: str) -> list[str] | None:
+        """Continue the translation conversation with a KV-cached sparse audit turn."""
+        if self._sparse_editor is None or draft.turn is None or draft.turn_indices is None:
+            return None
+        indices = draft.turn_indices
+        sub_drafts = [draft.targets[index] for index in indices]
+        result = self._sparse_editor.edit_continue(
+            draft.turn,
+            sub_drafts,
+            next_source=next_source,
+        )
+        if result is None or len(result.targets) != len(indices):
+            return None
+        polished = list(draft.targets)
+        for index, text in zip(indices, result.targets):
+            polished[index] = strip_ruby_markers(text)
+        return polished
+
+    def _continue_polish(self, draft: BatchDraft, next_source: str) -> list[str] | None:
+        """Continue the translation conversation and restore filtered source positions."""
+        if draft.turn is None or draft.turn_indices is None:
+            return None
+        indices = draft.turn_indices
+        continued = self._polisher.polish_continue(
+            draft.turn,
+            n=len(indices),
+            next_source=next_source,
+        )
+        if continued is None or len(continued) != len(indices):
+            return None
+        polished = list(draft.targets)
+        for index, text in zip(indices, continued):
+            polished[index] = strip_ruby_markers(text)
+        return polished
 
 
 def resume_batches(segments: list[Segment], max_tokens: int) -> list[list[Segment]]:

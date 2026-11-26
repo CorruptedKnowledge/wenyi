@@ -80,6 +80,10 @@ def routing_handler(messages, tier, json_mode):
             ensure_ascii=False,
         )
 
+    if "terminology consistency aligner" in system:
+        # No historical rewrites: newly found terms keep their extracted targets.
+        return json.dumps({"terms": []})
+
     if "chapter digest writer" in system:
         return "本章梗概：人物登场，情节推进。"
 

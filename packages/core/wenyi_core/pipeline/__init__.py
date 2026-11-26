@@ -69,9 +69,14 @@ from .run import (
 from .translate import (
     babeldoc_context,  # noqa: F401
     context,  # noqa: F401
+    extraction_queue,  # noqa: F401
     glossary_notes,  # noqa: F401
+    parallel_chapters,  # noqa: F401
+    polish_queue,  # noqa: F401
+    post_normalize,  # noqa: F401
     precision,  # noqa: F401
     precision_records,  # noqa: F401
+    seed_service,  # noqa: F401
     title_translation,  # noqa: F401
     translation,  # noqa: F401
     translation_batch,  # noqa: F401
@@ -91,6 +96,11 @@ __all__ = [
     "glossary_notes",
     "context",
     "babeldoc_context",
+    "extraction_queue",
+    "parallel_chapters",
+    "polish_queue",
+    "post_normalize",
+    "seed_service",
     "precision",
     "precision_records",
     "annotations",

@@ -577,7 +577,7 @@ def test_resume_refreshes_full_glossary_before_pending_batches(
     config.pipeline.polish = polish
     source = tmp_path / "book.txt"
     source.write_text(
-        "Alice waited by the window.\n\nThe door opened slowly.\n\nA letter arrived later.",
+        "Alice waited by the window.\n\nThe door opened slowly.\n\nA letter for Alice arrived later.",
         encoding="utf-8",
     )
 
@@ -599,6 +599,8 @@ def test_resume_refreshes_full_glossary_before_pending_batches(
     def interrupt(*args, **kwargs):
         if checkpoint_saved:
             extract(*args, **kwargs)
+            # Store the overlapped extraction, writing its checkpoint, before interrupting.
+            first._translation._extraction_queue.settle()
         raise KeyboardInterrupt("after saving the first target")
 
     with monkeypatch.context() as patcher:
@@ -626,10 +628,11 @@ def test_resume_refreshes_full_glossary_before_pending_batches(
     calls = [call for call in client.calls if call["operation"] == "translation.body"]
     assert len(calls) == 2
     for call in calls:
+        system = call["messages"][0]["content"]
         user = call["messages"][-1]["content"]
-        assert "Alice → 爱丽丝" in user
-        assert "Outside → 外部术语" in user
-        assert user.index("Zebra → 斑马") < user.index("Apple → 苹果")
+        assert "Alice → 爱丽丝" in system
+        assert "Outside → 外部术语" in system
+        assert system.index("Zebra → 斑马") < system.index("Apple → 苹果")
         assert "Alice waited by the window." not in _numbered_sources(user)
     cached_client = FakeClient(handler=handler)
     Orchestrator(config, client=cached_client).run(str(source))

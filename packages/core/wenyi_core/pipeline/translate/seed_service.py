@@ -1,0 +1,175 @@
+"""Resumable upfront CJK glossary seeding service for parallel chapter translation.
+
+Caches the compiled seed as a single atomic Storage artifact keyed by source hash,
+digests, synopsis/style, locked user glossary, language direction, and routing
+fingerprint. Publishing seeded terms into the glossary store is idempotent and never
+overwrites user-imported or manually edited entries (``first_chapter is None``).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
+
+from ...agents.cjk_seed import CjkGlossarySeeder, mine_cjk_candidates
+from ...events import ProgressFn
+from ...i18n.languages import glossary_context_dependent_sources
+from ...llm.routing import inference_snapshot
+from ...models.glossary import GlossaryTerm
+from ...storage.protocol import Storage
+
+if TYPE_CHECKING:
+    from ..run.runtime import PipelineRuntime
+
+SEED_ARTIFACT_KEY = "glossary/cjk_seed.json"
+_SEED_SCHEMA_VERSION = 1
+
+
+class CjkGlossarySeedService:
+    """Seed a compact, frequency-ordered glossary before parallel chapter translation."""
+
+    def __init__(self, runtime: PipelineRuntime, seeder: CjkGlossarySeeder | None = None):
+        self._runtime = runtime
+        self._seeder = seeder or CjkGlossarySeeder(runtime.client, runtime.config)
+
+    def ensure_seeded(
+        self,
+        store: Storage,
+        *,
+        digests: Sequence[str],
+        source_corpus: str,
+        book_synopsis: str = "",
+        style: str = "",
+        progress: ProgressFn | None = None,
+        checkpoint_usage: Callable[[], None] | None = None,
+    ) -> int:
+        """Seed or restore upfront CJK glossary terms; return count of seeded terms."""
+        self._seeder.src = self._runtime.config.source_lang
+        self._seeder.tgt = self._runtime.config.target_lang
+        self._seeder.language_policy = self._runtime.config.language_policy("translation")
+
+        existing_all = store.all_terms()
+        # Only user-owned entries (first_chapter is None) define the immutable seed fingerprint.
+        user_terms = [t for t in existing_all if t.first_chapter is None]
+        fingerprint = self._fingerprint(store, digests, book_synopsis, style, user_terms)
+
+        cached = store.read_artifact(SEED_ARTIFACT_KEY)
+        if (
+            isinstance(cached, dict)
+            and cached.get("version") == _SEED_SCHEMA_VERSION
+            and cached.get("fingerprint") == fingerprint
+            and isinstance(cached.get("terms"), list)
+        ):
+            terms = [self._deserialize_term(item) for item in cached["terms"]]
+            terms = [t for t in terms if t is not None]
+            return self._publish_idempotent(store, terms)
+
+        if progress:
+            progress(0, 1, "progress.stage.seedingGlossary")
+
+        context_sources = glossary_context_dependent_sources(self._runtime.config.source_lang)
+        candidates = mine_cjk_candidates(
+            digests,
+            source_corpus,
+            existing_sources={t.source for t in user_terms},
+            context_dependent_sources=context_sources,
+        )
+        seeded = self._seeder.seed(
+            candidates,
+            book_synopsis=book_synopsis,
+            style=style,
+            existing_terms=user_terms,
+            max_workers=max(1, self._runtime.config.pipeline.prescan_concurrency),
+        )
+        if checkpoint_usage is not None:
+            checkpoint_usage()
+
+        # Persist the paid seed artifact before publishing into SQLite so an interrupt
+        # during publication resumes with zero extra LLM calls.
+        store.write_artifact(
+            SEED_ARTIFACT_KEY,
+            {
+                "version": _SEED_SCHEMA_VERSION,
+                "fingerprint": fingerprint,
+                "terms": [self._serialize_term(t) for t in seeded],
+            },
+        )
+        published = self._publish_idempotent(store, seeded)
+        store.log_event(
+            "cjk_glossary_seeded",
+            candidates=len(candidates),
+            seeded=len(seeded),
+            published=published,
+        )
+        return published
+
+    def _fingerprint(
+        self,
+        store: Storage,
+        digests: Sequence[str],
+        book_synopsis: str,
+        style: str,
+        user_terms: Sequence[GlossaryTerm],
+    ) -> str:
+        manifest = store.load_manifest()
+        payload = {
+            "v": _SEED_SCHEMA_VERSION,
+            "source_sha256": manifest.get("source_sha256", ""),
+            "src": self._runtime.config.source_lang,
+            "tgt": self._runtime.config.target_lang,
+            "digests": list(digests),
+            "synopsis": book_synopsis,
+            "style": style,
+            "routing": inference_snapshot(self._runtime.config.llm, ("glossary.extract",)),
+            "user_terms": [
+                (t.source, t.target, t.type, t.gender, tuple(t.aliases)) for t in user_terms
+            ],
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _publish_idempotent(store: Storage, terms: Sequence[GlossaryTerm]) -> int:
+        """Insert seeded terms in frequency order without overwriting existing entries."""
+        existing = {t.source for t in store.all_terms()}
+        inserted = 0
+        for term in terms:
+            if term.source in existing:
+                continue
+            status = store.upsert_term(term, chapter=0)
+            if status == "inserted":
+                inserted += 1
+            existing.add(term.source)
+        return inserted
+
+    @staticmethod
+    def _serialize_term(term: GlossaryTerm) -> dict[str, Any]:
+        return {
+            "source": term.source,
+            "target": term.target,
+            "type": term.type,
+            "gender": term.gender,
+            "aliases": list(term.aliases),
+        }
+
+    @staticmethod
+    def _deserialize_term(raw: Any) -> GlossaryTerm | None:
+        if not isinstance(raw, dict):
+            return None
+        source = str(raw.get("source") or "").strip()
+        target = str(raw.get("target") or "").strip()
+        if not source or not target:
+            return None
+        aliases = raw.get("aliases")
+        return GlossaryTerm(
+            source=source,
+            target=target,
+            type=str(raw.get("type") or "term"),
+            gender=str(raw.get("gender") or ""),
+            aliases=[str(a) for a in aliases if isinstance(a, str)]
+            if isinstance(aliases, list)
+            else [],
+            first_chapter=0,
+        )
