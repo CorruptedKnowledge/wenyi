@@ -146,10 +146,12 @@ class PostgresRepository:
             dal.set_project_status(job["project_id"], status)
 
     def update_term(self, pid, storage, source, term):
+        status = "context_dependent" if term.status == "context_dependent" else "ok"
         with self.pool.connection() as conn:
             conn.execute(
                 """UPDATE glossary SET source=%s,target=%s,reading=%s,type=%s,gender=%s,
-                aliases=%s,note=%s,status='ok',updated_at=%s WHERE project_id=%s AND source=%s""",
+                aliases=%s,note=%s,status=%s,first_chapter=NULL,updated_at=%s
+                WHERE project_id=%s AND source=%s""",
                 (
                     term.source,
                     term.target,
@@ -158,6 +160,7 @@ class PostgresRepository:
                     term.gender,
                     Jsonb(term.aliases),
                     term.note,
+                    status,
                     time.time(),
                     pid,
                     source,
@@ -270,19 +273,52 @@ def postgres_repository(context: BackendContext) -> PostgresRepository:
     return repository
 
 
-def create_context(settings: Settings) -> BackendContext:
+def create_context(settings: Settings, *, loop=None) -> BackendContext:
+    import asyncio
+
     from .queue import enqueue
 
     repository = PostgresRepository(settings)
+    telemetry = RedisTelemetry(settings.redis_url, repository)
 
     async def submit(name, **kwargs):
         return await enqueue(settings.redis_url, name, settings.api_token, **kwargs)
+
+    def schedule_auto_resume(request, attempt: int, delay_seconds: int, next_retry_at: str) -> None:
+        coro = enqueue(
+            settings.redis_url,
+            "run_auto_resume",
+            settings.api_token,
+            _defer_by=delay_seconds,
+            _job_id=f"auto-resume:{request.project_id}:{request.run_id or 'none'}:{attempt}",
+            project_id=request.project_id,
+            expected_run_id=request.run_id,
+            attempt=attempt,
+        )
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=10)
+        else:
+            asyncio.run(coro)
+
+    def cancel_auto_resume(pid: str) -> None:
+        cache = None
+        try:
+            cache = telemetry.connect()
+            cache.set(f"project:{pid}:auto_resume", "", ex=604800)
+        except Exception:
+            pass
+        finally:
+            if cache is not None:
+                try:
+                    telemetry.release(cache)
+                except Exception:
+                    pass
 
     return BackendContext(
         repository=repository,
         settings_store=PostgresSettings(repository, settings.config_path),
         exports=PostgresExports(repository),
-        telemetry=RedisTelemetry(settings.redis_url, repository),
+        telemetry=telemetry,
         storage_for=repository.storage_for,
         read_storage_for=repository.storage_for,
         build_client=build_client,
@@ -295,4 +331,6 @@ def create_context(settings: Settings) -> BackendContext:
         require_token=settings.require_token,
         remove_project=repository.remove_project,
         metrics=Metrics(RedisCounters(settings.redis_url)),
+        schedule_auto_resume=schedule_auto_resume,
+        cancel_auto_resume=cancel_auto_resume,
     )

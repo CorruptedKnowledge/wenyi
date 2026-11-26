@@ -219,6 +219,7 @@ class TermIn(RequestModel):
     gender: str = ""
     aliases: list[str] = []
     note: str = ""
+    status: Literal["ok", "context_dependent"] = "ok"
 
 
 class TermPage(BaseModel):
@@ -237,10 +238,11 @@ class ConflictOut(BaseModel):
     proposed_target: Optional[str]
     chapter: Optional[int]
     note: Optional[str] = None
+    conflict_count: int = 1
 
 
 class ResolveConflict(RequestModel):
-    decision: Literal["current", "proposed", "custom"]
+    decision: Literal["current", "proposed", "custom", "context_dependent"]
     target: Optional[str] = None
 
 

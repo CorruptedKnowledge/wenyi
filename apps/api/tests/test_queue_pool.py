@@ -94,3 +94,37 @@ def test_enqueue_replaces_caller_supplied_signature(monkeypatch):
     kwargs = pool.calls[0]
     assert kwargs[SIGNATURE_FIELD] != "fake"
     assert verify_task("run_parse", payload_from(kwargs), kwargs[SIGNATURE_FIELD], "secret")
+
+
+def test_web_auto_resume_enqueues_deferred_workflow_task(monkeypatch, tmp_path):
+    from wenyi_api.adapters import create_context
+    from wenyi_api.config import Settings
+    from wenyi_backend.execution.contracts import ExecutionRequest
+
+    _install_fake_pools(monkeypatch)
+    context = create_context(
+        Settings(
+            database_url="postgresql://localhost/wenyi_test",
+            redis_url="redis://one",
+            data_dir=str(tmp_path),
+            config_path=str(tmp_path / "config.yaml"),
+        )
+    )
+    assert context.schedule_auto_resume is not None
+    context.schedule_auto_resume(
+        ExecutionRequest("translation", "proj-1", "run-1"),
+        2,
+        120,
+        "2026-11-21T12:00:00+00:00",
+    )
+    pool = next(iter(queue_module._pools.values()))
+    assert isinstance(pool, FakePool)
+    assert pool.jobs == [("run_auto_resume", queue_module.WORKFLOW_QUEUE)]
+    kwargs = pool.calls[0]
+    assert kwargs["_defer_by"] == 120
+    assert kwargs["project_id"] == "proj-1"
+    assert kwargs["expected_run_id"] == "run-1"
+    assert kwargs["attempt"] == 2
+    assert verify_task(
+        "run_auto_resume", payload_from(kwargs), kwargs[SIGNATURE_FIELD], context.api_token
+    )

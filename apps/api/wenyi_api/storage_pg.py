@@ -832,13 +832,46 @@ class PostgresStorage:
                     ),
                 )
                 return "inserted"
-            if existing.target == term.target:
+            from wenyi_core.models.glossary import merge_context_senses, promote_navigation_term
+
+            if existing.status == "context_dependent":
+                merged_target = merge_context_senses(existing.target, term.target)
                 aliases = sorted(set(existing.aliases) | set(term.aliases))
+                promoted_type, promoted_first_chapter = promote_navigation_term(
+                    existing, term, chapter
+                )
                 conn.execute(
-                    """UPDATE glossary SET reading=COALESCE(NULLIF(%s,''),reading),
+                    """UPDATE glossary SET target=%s,type=%s,first_chapter=%s,
+                    reading=COALESCE(NULLIF(%s,''),reading),
                     gender=COALESCE(NULLIF(%s,''),gender),aliases=%s,note=COALESCE(NULLIF(%s,''),note),
                     updated_at=%s WHERE project_id=%s AND source=%s""",
                     (
+                        merged_target or existing.target,
+                        promoted_type,
+                        promoted_first_chapter,
+                        term.reading,
+                        term.gender,
+                        Jsonb(aliases),
+                        term.note,
+                        now,
+                        self.project_id,
+                        term.source,
+                    ),
+                )
+                return "unchanged"
+            if existing.target == term.target:
+                aliases = sorted(set(existing.aliases) | set(term.aliases))
+                promoted_type, promoted_first_chapter = promote_navigation_term(
+                    existing, term, chapter
+                )
+                conn.execute(
+                    """UPDATE glossary SET type=%s,first_chapter=%s,
+                    reading=COALESCE(NULLIF(%s,''),reading),
+                    gender=COALESCE(NULLIF(%s,''),gender),aliases=%s,note=COALESCE(NULLIF(%s,''),note),
+                    updated_at=%s WHERE project_id=%s AND source=%s""",
+                    (
+                        promoted_type,
+                        promoted_first_chapter,
                         term.reading,
                         term.gender,
                         Jsonb(aliases),
@@ -860,11 +893,13 @@ class PostgresStorage:
             )
             return "conflict"
 
-    def resolve_term(self, source: str, target: str) -> bool:
+    def resolve_term(self, source: str, target: str, *, status: str = "ok") -> bool:
+        resolved_status = "context_dependent" if status == "context_dependent" else "ok"
         with self.state_lock(), self._conn as conn:
             cursor = conn.execute(
-                "UPDATE glossary SET target=%s,status='ok',updated_at=%s WHERE project_id=%s AND source=%s",
-                (target, time.time(), self.project_id, source),
+                "UPDATE glossary SET target=%s,status=%s,first_chapter=NULL,updated_at=%s "
+                "WHERE project_id=%s AND source=%s",
+                (target, resolved_status, time.time(), self.project_id, source),
             )
             return cursor.rowcount > 0
 
