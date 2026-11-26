@@ -23,7 +23,7 @@ from ...models.glossary import GlossaryTerm
 from ...storage.protocol import Storage
 from ...storage.run_store import STATUS_DONE
 from .babeldoc_context import BabeldocContext
-from .context import render_recent_translations
+from .context import following_chapter_source, render_recent_translations
 from .post_normalize import repair_escaped_newlines
 from .translation_batch import (
     POLISH_ATTEMPTS,
@@ -236,13 +236,6 @@ class ParallelChapterRunner:
             prev_chapter = loaded[prev_indices[-1]] if prev_indices else None
             opening_context = _source_lookbehind(prev_chapter, rolling_context_tokens)
 
-            next_indices = [idx for idx in all_indices if idx > ci]
-            next_ch_first = ""
-            if next_indices:
-                next_segs = loaded[next_indices[0]].text_segments
-                if next_segs:
-                    next_ch_first = next_segs[0].source
-
             batch_specs: list[_ChapterBatchSpec] = []
             cleared_stale_polish = False
             seg_base = 0
@@ -265,12 +258,7 @@ class ParallelChapterRunner:
                     cleared_stale_polish = True
                 if already_done:
                     align_existing.setdefault(ci, []).append((seg_base, len(b)))
-                next_src = ""
-                if body_ctx:
-                    if end < len(text_segs):
-                        next_src = text_segs[end].source
-                    else:
-                        next_src = next_ch_first
+                next_src = following_chapter_source(store, chapter, end, policy) if body_ctx else ""
                 batch_specs.append(
                     _ChapterBatchSpec(
                         batch_start=seg_base,
