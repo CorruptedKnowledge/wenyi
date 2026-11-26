@@ -77,7 +77,7 @@ pipeline:
   polish_concurrency: 1
   # Zero-cost post-translation repair of leaked newline escapes; never rewrites punctuation or names.
   deterministic_hygiene: true
-  # Fast post-translation cross-chapter sweep: patches missed glossary terms and confirmed title drift.
+  # Fast post-translation cross-chapter sweep: patches missed glossary terms; title drift needs compiled mode.
   consistency_sweep: false
   rolling_context_tokens: 512 # Recent translation budget in tokens (tiktoken cl100k_base)
   glossary_note_workers: 0 # Incremental evidence notes: 0 disables, 1-16 workers per batch
@@ -199,7 +199,7 @@ class PipelineConfig(BaseModel):
     polish_concurrency: int = Field(default=1, ge=1)
     # Repair leaked newline escapes (no model calls); punctuation and names are never rewritten.
     deterministic_hygiene: bool = True
-    # Fast post-translation cross-chapter sweep (missed glossary terms + confirmed title drift).
+    # Fast cross-chapter sweep: missed glossary terms, plus Book Bible title drift in compiled mode.
     consistency_sweep: bool = False
     rolling_context_tokens: int = Field(default=512, ge=0)
     # Note generation requires an opted-in workflow runner.

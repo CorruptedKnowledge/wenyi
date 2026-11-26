@@ -54,7 +54,7 @@ pipeline:
   polish_concurrency: 1
   # Zero-cost post-translation repair of leaked newline escapes; never rewrites punctuation or names.
   deterministic_hygiene: true
-  # Fast post-translation cross-chapter sweep: patches missed glossary terms and confirmed title drift.
+  # Fast post-translation cross-chapter sweep: patches missed glossary terms; title drift needs compiled mode.
   consistency_sweep: false
   rolling_context_tokens: 512 # Recent translation budget in tokens (tiktoken cl100k_base)
   glossary_note_workers: 0 # Incremental evidence notes: 0 disables, 1-16 workers per batch
