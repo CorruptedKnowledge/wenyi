@@ -421,3 +421,118 @@ def test_bible_resume_after_post_compile_interrupt_matches_uninterrupted_run(
         assert "glossary_bible_reused" in events
     finally:
         store.close()
+
+
+def _bible_cfg():
+    return Config.from_dict(
+        {"llm": {"preset": "fake"}, "language": {"source": "zh", "target": "en"}}
+    )
+
+
+def _interrupt_voice(store):
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    agent = _bible_agent()
+    agent.compile_voice_exemplars.side_effect = RuntimeError("simulated voice interrupt")
+    with pytest.raises(RuntimeError, match="simulated"):
+        _seed(BibleSeedService(agent, _bible_cfg()), store)
+    return agent
+
+
+def test_unfinished_bible_never_reaches_the_glossary(tmp_path):
+    store = _bible_store(tmp_path / "s")
+    try:
+        _interrupt_voice(store)
+        assert store.get_term("白石") is None
+    finally:
+        store.close()
+
+
+def test_changed_inputs_after_interrupt_recompile_with_the_same_glossary(tmp_path):
+    from wenyi_core.models.glossary import GlossaryTerm
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        _interrupt_voice(store)
+        # The user adds an unrelated entry, so the stale checkpoint no longer applies.
+        store.upsert_term(GlossaryTerm("采石场", "the quarry", type="place"))
+        agent = _bible_agent()
+        variants = _seed(BibleSeedService(agent, _bible_cfg()), store)
+        assert agent.compile_bible.call_count == 1
+        assert variants == {"白石": ("White Stone", "White Rock")}
+        assert store.get_term("白石").target == "White Stone"
+    finally:
+        store.close()
+
+
+def test_bible_publication_finishes_after_a_stop_past_the_artifact(tmp_path, monkeypatch):
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        monkeypatch.setattr(
+            BibleSeedService,
+            "_publish_seeds",
+            staticmethod(lambda store, seeds: (_ for _ in ()).throw(RuntimeError("stop"))),
+        )
+        with pytest.raises(RuntimeError, match="stop"):
+            _seed(BibleSeedService(_bible_agent(), _bible_cfg()), store)
+        assert store.read_artifact("glossary_bible.json") is not None
+        assert store.get_term("白石") is None
+        monkeypatch.undo()
+
+        agent = _bible_agent()
+        _seed(BibleSeedService(agent, _bible_cfg()), store)
+        agent.compile_bible.assert_not_called()
+        assert store.get_term("白石").target == "White Stone"
+        assert store.read_artifact("glossary_bible.checkpoint.json") is None
+    finally:
+        store.close()
+
+
+def test_resumed_publication_records_a_navigation_conflict_once(tmp_path):
+    from wenyi_core.models.glossary import TYPE_NAVIGATION, GlossaryTerm
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        store.upsert_term(GlossaryTerm("白石", "The White Rock", type=TYPE_NAVIGATION))
+        service = BibleSeedService(_bible_agent(), _bible_cfg())
+        _seed(service, store)
+        first = len(store.open_conflicts())
+        assert first == 1
+        # Repeating publication, as a resume after a stop would, adds nothing.
+        BibleSeedService._publish_seeds(store, [GlossaryTerm("白石", "White Stone", type="place")])
+        assert len(store.open_conflicts()) == first
+    finally:
+        store.close()
+
+
+def test_bible_records_usage_before_each_checkpoint(tmp_path):
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        order: list[str] = []
+        original_write = store.write_artifact
+
+        def write(key, value):
+            order.append(f"write:{key}")
+            return original_write(key, value)
+
+        store.write_artifact = write
+        BibleSeedService(_bible_agent(), _bible_cfg()).ensure_seeded(
+            store,
+            digests=["白石 and 国主 appear."],
+            source_corpus=_BIBLE_CORPUS,
+            book_synopsis="Syn",
+            style="S",
+            repeated_quotes=_BIBLE_QUOTES,
+            checkpoint_usage=lambda: order.append("usage"),
+        )
+        checkpoint_writes = [i for i, e in enumerate(order) if e.endswith("checkpoint.json")]
+        assert len(checkpoint_writes) == 2
+        assert all(order[i - 1] == "usage" for i in checkpoint_writes)
+    finally:
+        store.close()

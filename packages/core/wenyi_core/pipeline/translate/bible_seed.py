@@ -3,10 +3,13 @@
 Runs before body translation starts under the book lock. Caches its compiled result as a
 Storage artifact keyed by source hash, digest content, synopsis, style brief, existing user
 glossary snapshot, language direction and routing fingerprint so resumes never repeat
-probe/adjudication model calls. The adjudicated result is checkpointed before its terms reach
-the glossary, and the quote pass is checkpointed before the voice pass, so an interruption
-at any later step resumes with the same outcome as an uninterrupted run. User-imported or
-manually edited glossary entries (``first_chapter is None``) are never overwritten.
+probe/adjudication model calls. The adjudicated result is checkpointed as soon as it is paid
+for, and the quote pass before the voice pass, so an interruption at any later step resumes
+with the same outcome as an uninterrupted run. Compiled terms stay staged in memory (the quote
+and voice passes read them from there) and reach the glossary only once the Bible artifact is
+written, through an idempotent publish that a resumed run repeats safely. An unfinished
+compilation therefore never changes the glossary a recompile sees. User-imported or manually
+edited glossary entries (``first_chapter is None``) are never overwritten.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, fields, replace
 from typing import Any
 
@@ -75,6 +78,13 @@ def _term_from_record(item: Any) -> GlossaryTerm | None:
         return GlossaryTerm(**data)
     except TypeError:
         return None
+
+
+def _seed_terms_from_record(saved: Any) -> list[GlossaryTerm]:
+    raw = saved.get("seed_terms") if isinstance(saved, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [term for term in (_term_from_record(item) for item in raw) if term is not None]
 
 
 def _str_tuple_map(raw: Any) -> dict[str, tuple[str, ...]]:
@@ -157,8 +167,13 @@ class BibleSeedService:
         style: str,
         repeated_quotes: Sequence[str] = (),
         progress: ProgressFn | None = None,
+        checkpoint_usage: Callable[[], None] | None = None,
     ) -> dict[str, tuple[str, ...]]:
-        """Seed the glossary once before translation; return observed variant spellings."""
+        """Seed the glossary once before translation; return observed variant spellings.
+
+        ``checkpoint_usage`` persists the usage of the model calls made so far; it runs before
+        each checkpoint is written, so a hard stop never leaves a paid call unrecorded.
+        """
         manifest = store.load_manifest()
         source_hash = str(manifest.get("source_sha256") or "")
         existing_terms = [t for t in store.all_terms() if t.type != TYPE_NAVIGATION]
@@ -202,6 +217,9 @@ class BibleSeedService:
                 for k, v in (saved.get("divergent_titles") or {}).items()
                 if isinstance(k, str) and isinstance(v, list)
             }
+            # A run stopped after the artifact but before publication finishes publishing here.
+            self._publish_seeds(store, _seed_terms_from_record(saved))
+            store.delete_artifact(_CHECKPOINT_ARTIFACT)
             store.log_event(
                 "glossary_bible_reused",
                 seeded=len(saved.get("seeded_sources") or []),
@@ -228,31 +246,25 @@ class BibleSeedService:
                 style=style,
                 existing_terms=existing_terms,
             )
+            if checkpoint_usage is not None:
+                checkpoint_usage()
             checkpoint = _checkpoint_record(fp, result, inserted)
-            # Persist the paid adjudication before any term reaches the glossary: once seeded,
-            # a term is an existing entry and a recompile would no longer see its variants.
             store.write_artifact(_CHECKPOINT_ARTIFACT, checkpoint)
 
-        # Idempotent publication: terms seeded before an interruption are already present.
+        # Staged seeds: the quote and voice passes see them without the glossary changing.
         pending = set(inserted)
-        present = {
-            normalize_match_text(t.source).strip()
-            for t in store.all_terms()
-            if t.type != TYPE_NAVIGATION
-        }
-        for term in result.terms:
-            norm_src = normalize_match_text(term.source).strip()
-            if term.source not in pending or norm_src in present:
-                continue
-            store.upsert_term(term)
-            present.add(norm_src)
-
-        all_terms = [t for t in store.all_terms() if t.type != TYPE_NAVIGATION]
+        seeds = [t for t in result.terms if t.source in pending]
+        present = {normalize_match_text(t.source).strip() for t in existing_terms}
+        all_terms = list(existing_terms) + [
+            t for t in seeds if normalize_match_text(t.source).strip() not in present
+        ]
         quote_targets: dict[str, str] = {}
         saved_quotes = checkpoint.get("quote_targets") if isinstance(checkpoint, dict) else None
         if isinstance(saved_quotes, dict):
             quote_targets = {
-                k: v for k, v in saved_quotes.items() if isinstance(k, str) and isinstance(v, str)
+                k: v
+                for k, v in saved_quotes.items()
+                if isinstance(k, str) and isinstance(v, str) and v.strip()
             }
         elif repeated_quotes:
             quote_targets = self._agent.pretranslate_quotes(
@@ -261,6 +273,8 @@ class BibleSeedService:
                 style=style,
                 conventions=result.conventions,
             )
+            if checkpoint_usage is not None:
+                checkpoint_usage()
             # Keep the paid quote renderings if the voice pass is interrupted next.
             checkpoint = {**checkpoint, "quote_targets": quote_targets}
             store.write_artifact(_CHECKPOINT_ARTIFACT, checkpoint)
@@ -289,6 +303,7 @@ class BibleSeedService:
             "candidate_count": result.candidate_count,
             "divergent_count": result.divergent_count,
             "seeded_sources": inserted,
+            "seed_terms": [asdict(term) for term in seeds],
             "variants_by_source": {k: list(v) for k, v in result.variants_by_source.items()},
             "conventions": list(result.conventions),
             "quote_targets": quote_targets,
@@ -296,6 +311,7 @@ class BibleSeedService:
             "divergent_titles": {k: list(v) for k, v in self.last_divergent_titles.items()},
         }
         store.write_artifact(_BIBLE_ARTIFACT, record)
+        self._publish_seeds(store, seeds)
         store.delete_artifact(_CHECKPOINT_ARTIFACT)
         store.log_event(
             "glossary_bible_compiled",
@@ -307,6 +323,31 @@ class BibleSeedService:
             voice_exemplars=len(voice_exemplars),
         )
         return result.variants_by_source
+
+    @staticmethod
+    def _publish_seeds(store: Storage, seeds: Sequence[GlossaryTerm]) -> None:
+        """Write staged Bible terms to the glossary; repeating it changes nothing.
+
+        A source that already has a non-navigation entry is kept as is. A navigation stub is
+        upserted once: if that records a conflict, a repeat finds the open conflict and stops.
+        """
+        if not seeds:
+            return
+        conflicts = {
+            (
+                normalize_match_text(str(c.get("source") or "")).strip(),
+                str(c.get("proposed_target") or "").strip(),
+            )
+            for c in store.open_conflicts()
+        }
+        for term in seeds:
+            existing = store.get_term(term.source)
+            if existing is not None and existing.type != TYPE_NAVIGATION:
+                continue
+            key = (normalize_match_text(term.source).strip(), term.target.strip())
+            if key in conflicts:
+                continue
+            store.upsert_term(term)
 
     def _compile(
         self,
