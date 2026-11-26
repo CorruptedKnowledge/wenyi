@@ -536,3 +536,80 @@ def test_bible_records_usage_before_each_checkpoint(tmp_path):
         assert all(order[i - 1] == "usage" for i in checkpoint_writes)
     finally:
         store.close()
+
+
+def test_completed_bible_reuse_keeps_later_glossary_edits(tmp_path):
+    from wenyi_core.models.glossary import TYPE_NAVIGATION, GlossaryTerm
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        store.upsert_term(GlossaryTerm("国主", "The Sovereign", type=TYPE_NAVIGATION))
+        _seed(BibleSeedService(_bible_agent(), _bible_cfg()), store)
+        assert store.get_term("白石") is not None
+        # The user deletes a seeded entry after the Bible completed.
+        store.delete_term("白石")
+        _seed(BibleSeedService(_bible_agent(), _bible_cfg()), store)
+        assert store.get_term("白石") is None
+    finally:
+        store.close()
+
+
+def test_completed_bible_reuse_does_not_reopen_a_resolved_navigation_conflict(tmp_path):
+    from wenyi_core.models.glossary import TYPE_NAVIGATION, GlossaryTerm
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        store.upsert_term(GlossaryTerm("白石", "The White Rock", type=TYPE_NAVIGATION))
+        _seed(BibleSeedService(_bible_agent(), _bible_cfg()), store)
+        assert len(store.open_conflicts()) == 1
+        store.mark_conflicts_resolved("白石")
+        _seed(BibleSeedService(_bible_agent(), _bible_cfg()), store)
+        assert store.open_conflicts() == []
+    finally:
+        store.close()
+
+
+def test_bible_prompts_never_see_a_seed_that_only_opens_a_conflict(tmp_path):
+    from wenyi_core.models.glossary import TYPE_NAVIGATION, GlossaryTerm
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        store.upsert_term(GlossaryTerm("白石", "The White Rock", type=TYPE_NAVIGATION))
+        agent = _bible_agent()
+        _seed(BibleSeedService(agent, _bible_cfg()), store)
+        for call in (agent.pretranslate_quotes, agent.compile_voice_exemplars):
+            prompt_terms = call.call_args.kwargs["terms"]
+            assert all(t.source != "白石" for t in prompt_terms)
+    finally:
+        store.close()
+
+
+def test_bible_records_usage_before_the_final_artifact(tmp_path):
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    store = _bible_store(tmp_path / "s")
+    try:
+        order: list[str] = []
+        original_write = store.write_artifact
+
+        def write(key, value):
+            order.append(f"write:{key}")
+            return original_write(key, value)
+
+        store.write_artifact = write
+        BibleSeedService(_bible_agent(), _bible_cfg()).ensure_seeded(
+            store,
+            digests=["白石 and 国主 appear."],
+            source_corpus=_BIBLE_CORPUS,
+            book_synopsis="Syn",
+            style="S",
+            repeated_quotes=_BIBLE_QUOTES,
+            checkpoint_usage=lambda: order.append("usage"),
+        )
+        final = order.index("write:glossary_bible.json")
+        assert order[final - 1] == "usage"
+    finally:
+        store.close()

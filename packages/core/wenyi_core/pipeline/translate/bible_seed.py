@@ -217,9 +217,12 @@ class BibleSeedService:
                 for k, v in (saved.get("divergent_titles") or {}).items()
                 if isinstance(k, str) and isinstance(v, list)
             }
-            # A run stopped after the artifact but before publication finishes publishing here.
-            self._publish_seeds(store, _seed_terms_from_record(saved))
-            store.delete_artifact(_CHECKPOINT_ARTIFACT)
+            # A leftover checkpoint means a run stopped after the artifact but before publication
+            # finished; complete it once. Otherwise publication is done, and later glossary edits
+            # (a deleted seed, a resolved conflict) belong to the user.
+            if store.read_artifact(_CHECKPOINT_ARTIFACT) is not None:
+                self._publish_seeds(store, _seed_terms_from_record(saved))
+                store.delete_artifact(_CHECKPOINT_ARTIFACT)
             store.log_event(
                 "glossary_bible_reused",
                 seeded=len(saved.get("seeded_sources") or []),
@@ -251,12 +254,22 @@ class BibleSeedService:
             checkpoint = _checkpoint_record(fp, result, inserted)
             store.write_artifact(_CHECKPOINT_ARTIFACT, checkpoint)
 
-        # Staged seeds: the quote and voice passes see them without the glossary changing.
+        # Staged seeds: the quote and voice passes see the glossary as publication will leave it,
+        # without the glossary changing yet. A seed over a navigation stub with another target
+        # only opens a conflict, so the prompts do not see it.
         pending = set(inserted)
         seeds = [t for t in result.terms if t.source in pending]
         present = {normalize_match_text(t.source).strip() for t in existing_terms}
+        nav_targets = {
+            normalize_match_text(t.source).strip(): t.target.strip()
+            for t in store.all_terms()
+            if t.type == TYPE_NAVIGATION
+        }
         all_terms = list(existing_terms) + [
-            t for t in seeds if normalize_match_text(t.source).strip() not in present
+            t
+            for t in seeds
+            if (key := normalize_match_text(t.source).strip()) not in present
+            and nav_targets.get(key, t.target.strip()) == t.target.strip()
         ]
         quote_targets: dict[str, str] = {}
         saved_quotes = checkpoint.get("quote_targets") if isinstance(checkpoint, dict) else None
@@ -310,6 +323,8 @@ class BibleSeedService:
             "voice_exemplars": [[s, t] for s, t in voice_exemplars],
             "divergent_titles": {k: list(v) for k, v in self.last_divergent_titles.items()},
         }
+        if checkpoint_usage is not None:
+            checkpoint_usage()
         store.write_artifact(_BIBLE_ARTIFACT, record)
         self._publish_seeds(store, seeds)
         store.delete_artifact(_CHECKPOINT_ARTIFACT)
@@ -328,8 +343,9 @@ class BibleSeedService:
     def _publish_seeds(store: Storage, seeds: Sequence[GlossaryTerm]) -> None:
         """Write staged Bible terms to the glossary; repeating it changes nothing.
 
-        A source that already has a non-navigation entry is kept as is. A navigation stub is
-        upserted once: if that records a conflict, a repeat finds the open conflict and stops.
+        A source that already has a non-navigation entry (compared by normalized match key) is
+        kept as is. A navigation stub is upserted once: if that records a conflict, a repeat
+        finds the open conflict and stops.
         """
         if not seeds:
             return
@@ -340,14 +356,17 @@ class BibleSeedService:
             )
             for c in store.open_conflicts()
         }
+        entries = {
+            normalize_match_text(t.source).strip()
+            for t in store.all_terms()
+            if t.type != TYPE_NAVIGATION
+        }
         for term in seeds:
-            existing = store.get_term(term.source)
-            if existing is not None and existing.type != TYPE_NAVIGATION:
-                continue
-            key = (normalize_match_text(term.source).strip(), term.target.strip())
-            if key in conflicts:
+            norm = normalize_match_text(term.source).strip()
+            if norm in entries or (norm, term.target.strip()) in conflicts:
                 continue
             store.upsert_term(term)
+            entries.add(norm)
 
     def _compile(
         self,
