@@ -284,3 +284,140 @@ def test_preparation_analysis_cache_key_preserves_small_books_and_invalidates_cl
     _, calls_3 = _run_analysis("big", big_digests, 400)
     _, calls_4 = _run_analysis("big", big_digests, 300)
     assert calls_3 == 1 and calls_4 == 1
+
+
+# --- Book Bible checkpoint: interruptions after compile_bible must not lose paid results ------
+
+_BIBLE_CORPUS = (
+    "白石镇坐落在群山之间，镇上的居民世代以采石为生，清晨的雾气总是久久不散，"
+    "石匠们背着工具沿着山路缓缓走向采石场，脚步声在空旷的山谷里回荡不息。\n"
+    "「你又去白石了？」老石匠放下手中的凿子，抬头望着远方的山脊，语气里带着几分担忧，"
+    "「那里的路越来越难走了，雨季一到，山上的碎石便会滚落下来。」\n"
+    "多年以后，白石镇的采石场早已荒废，只有那条蜿蜒的山路还记得当年的喧闹，"
+    "国主派来的使者站在镇口，望着空荡荡的街道，久久没有说话，只是轻轻叹了一口气。\n"
+)
+_BIBLE_QUOTES = ("山高月小，水落石出，此景难忘。",)
+
+
+def _compile_bible_side_effect(digests, source_corpus, *, existing_terms=(), **_kwargs):
+    """Mirror BookBibleAgent.compile_bible: sources already in the glossary are not re-mined."""
+    from wenyi_core.agents.book_bible import BibleResult
+    from wenyi_core.models.glossary import GlossaryTerm
+
+    known = {t.source for t in existing_terms}
+    if "白石" in known:
+        return BibleResult(terms=(), variants_by_source={}, candidate_count=0, divergent_count=0)
+    return BibleResult(
+        terms=(GlossaryTerm("白石", "White Stone", type="place", first_chapter=0),),
+        variants_by_source={"白石": ("White Stone", "White Rock")},
+        candidate_count=3,
+        divergent_count=1,
+        conventions=("Render 国主 as 'the Sovereign'.",),
+        divergent_titles=(("国主", ("the Sovereign", "the King")),),
+    )
+
+
+def _bible_store(path):
+    from wenyi_core.models.glossary import GlossaryTerm
+
+    store = FileStorage(str(path))
+    manifest = store.stage_document(
+        Document(
+            source_lang="zh",
+            target_lang="en",
+            fmt="txt",
+            chapters=[Chapter(index=0, segments=[Segment(index=0, source=_BIBLE_CORPUS)])],
+        ),
+        source_hash="b" * 64,
+    )
+    store.save_manifest(manifest)
+    # A user-imported entry must survive and keep the fingerprint stable.
+    store.upsert_term(GlossaryTerm("老石匠", "the Old Mason", type="person"))
+    return store
+
+
+def _bible_agent():
+    agent = Mock()
+    agent.compile_bible.side_effect = _compile_bible_side_effect
+    agent.pretranslate_quotes.return_value = {_BIBLE_QUOTES[0]: "High peaks, a small moon."}
+    agent.compile_voice_exemplars.return_value = (("白石镇坐落在群山之间。", "White Stone sits."),)
+    return agent
+
+
+def _seed(service, store):
+    return service.ensure_seeded(
+        store,
+        digests=["白石 and 国主 appear."],
+        source_corpus=_BIBLE_CORPUS,
+        book_synopsis="Syn",
+        style="S",
+        repeated_quotes=_BIBLE_QUOTES,
+    )
+
+
+def _bible_outcome(service, variants, store):
+    bible = store.read_artifact("glossary_bible.json")
+    return {
+        "variants": variants,
+        "conventions": service.last_conventions,
+        "divergent_titles": service.last_divergent_titles,
+        "quote_targets": service.last_quote_targets,
+        "voice_exemplars": service.last_voice_exemplars,
+        "artifact": {k: v for k, v in bible.items() if k != "fingerprint"},
+        "terms": sorted((t.source, t.target, t.first_chapter) for t in store.all_terms()),
+    }
+
+
+@pytest.mark.parametrize("failing_step", ["pretranslate_quotes", "compile_voice_exemplars"])
+def test_bible_resume_after_post_compile_interrupt_matches_uninterrupted_run(
+    tmp_path, failing_step
+):
+    from wenyi_core.pipeline.translate.bible_seed import BibleSeedService
+
+    cfg = Config.from_dict(
+        {"llm": {"preset": "fake"}, "language": {"source": "zh", "target": "en"}}
+    )
+
+    clean_store = _bible_store(tmp_path / "clean")
+    try:
+        clean_service = BibleSeedService(_bible_agent(), cfg)
+        expected = _bible_outcome(clean_service, _seed(clean_service, clean_store), clean_store)
+    finally:
+        clean_store.close()
+    assert expected["variants"] == {"白石": ("White Stone", "White Rock")}
+
+    store = _bible_store(tmp_path / "resumed")
+    try:
+        agent = _bible_agent()
+        step = getattr(agent, failing_step)
+        paid_result = step.return_value
+        step.side_effect = RuntimeError(f"simulated {failing_step} interrupt")
+        with pytest.raises(RuntimeError, match="simulated"):
+            _seed(BibleSeedService(agent, cfg), store)
+        assert store.read_artifact("glossary_bible.json") is None
+        assert store.read_artifact("glossary_bible.checkpoint.json")["variants_by_source"]
+        quote_calls = agent.pretranslate_quotes.call_count
+
+        # Resume in a fresh service, as a new process would.
+        step.side_effect = None
+        step.return_value = paid_result
+        service = BibleSeedService(agent, cfg)
+        resumed = _bible_outcome(service, _seed(service, store), store)
+        assert resumed == expected
+        assert agent.compile_bible.call_count == 1
+        assert store.read_artifact("glossary_bible.checkpoint.json") is None
+        if failing_step == "compile_voice_exemplars":
+            # Quotes were already paid for before the voice call failed.
+            assert agent.pretranslate_quotes.call_count == quote_calls == 1
+        assert store.get_term("老石匠").first_chapter is None
+        assert store.get_term("老石匠").target == "the Old Mason"
+
+        # A completed Bible is reused without any further model call.
+        again = BibleSeedService(agent, cfg)
+        assert _bible_outcome(again, _seed(again, store), store) == expected
+        assert agent.compile_bible.call_count == 1
+        events = [event["event"] for event in store.list_events()]
+        assert events.count("glossary_bible_compiled") == 1
+        assert "glossary_bible_reused" in events
+    finally:
+        store.close()
