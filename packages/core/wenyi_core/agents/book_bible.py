@@ -28,6 +28,7 @@ from ..glossary.store import (
     normalize_match_text,
     source_occurrence_spans,
 )
+from ..glossary.targets import is_generic_target, is_name_shaped
 from ..i18n.languages import (
     glossary_context_dependent_sources,
     glossary_generic_target_words,
@@ -381,13 +382,14 @@ def _extract_distant_snippets(
     return _slice(first), _slice(second)
 
 
-def _is_generic_target(target: str, generic_words: frozenset[str]) -> bool:
+def _is_generic_target(
+    target: str, generic_words: frozenset[str], *, term_type: str | None = None
+) -> bool:
     if not generic_words:
         return False
-    words = _WORD_RE.findall(target.casefold())
-    if not words:
+    if not _WORD_RE.findall(target):
         return True
-    return all(w.replace("’", "'") in generic_words for w in words)
+    return is_generic_target(target, generic_words, term_type=term_type)
 
 
 _JA_TRAILING_HONORIFIC_CHARS = frozenset("様殿君氏卿")
@@ -926,11 +928,11 @@ class BookBibleAgent(Agent):
             norm = normalize_match_text(src).strip()
             if norm in seen or norm in blocked_sources:
                 continue
-            if _is_generic_target(tgt, generic_words):
-                continue
             term_type = str(item.get("type") or "term").strip().lower()
             if term_type not in {"person", "place", "organization", "term"}:
                 term_type = "term"
+            if _is_generic_target(tgt, generic_words, term_type=term_type):
+                continue
             gender = normalize_gender(str(item.get("gender") or ""))
             raw_aliases = item.get("aliases")
             aliases = [
@@ -1181,6 +1183,12 @@ class BookBibleAgent(Agent):
                 continue
             ra_gen = not ra or _is_generic_target(ra, generic_words)
             rb_gen = not rb or _is_generic_target(rb, generic_words)
+            # A one-word capitalized rendering ("Grace", "King") may be a character's name or a
+            # title; only the adjudicator, which assigns the type, can tell. Core anchors of that
+            # shape are therefore adjudicated as well as watched as titles.
+            name_shaped = (cand.from_digest or cand.count >= 5) and any(
+                v and is_name_shaped(v) for v in (ra, rb)
+            )
             if ra_gen and rb_gen:
                 # Keep high-frequency generic titles/offices (e.g. 国主 -> King/sovereign) for
                 # book-wide capitalization & lexical conventions even when the two probes agree.
@@ -1195,7 +1203,8 @@ class BookBibleAgent(Agent):
                     )
                 ):
                     divergent_generic.append((cand, ra, rb))
-                continue
+                if not name_shaped:
+                    continue
             divergent = bool(not ra or not rb or not equivalent_targets(ra, rb))
             if divergent:
                 divergent_count += 1
@@ -1203,13 +1212,16 @@ class BookBibleAgent(Agent):
                 # into the convention title ledger so they get locked even if excluded from `terms`.
                 if ra and rb and (ra_gen or rb_gen) and (cand.count >= 4 or cand.from_digest):
                     divergent_generic.append((cand, ra, rb))
-                    continue
+                    if not name_shaped:
+                        continue
             # Keep every divergent entity + core anchors (digest-cited or high frequency >= 5).
             if divergent or cand.from_digest or cand.count >= 5:
                 to_adjudicate.append((cand, ra, rb, divergent))
                 distinct_vars = tuple(
                     dict.fromkeys(
-                        v for v in (ra, rb) if v and not _is_generic_target(v, generic_words)
+                        v
+                        for v in (ra, rb)
+                        if v and (is_name_shaped(v) or not _is_generic_target(v, generic_words))
                     )
                 )
                 if distinct_vars:
