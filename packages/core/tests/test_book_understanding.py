@@ -102,26 +102,12 @@ def test_synopsis_does_not_swallow_cancellation_or_budget_stop(stop, method):
         getattr(Synopsizer(client, Config()), method)(*args)
 
 
-@pytest.mark.parametrize(("concurrency", "expected_calls"), [(1, 1), (4, 2)])
-def test_reduce_failure_does_not_omit_a_group_and_publish_the_rest(concurrency, expected_calls):
+def test_reduce_failure_does_not_omit_a_group_and_publish_the_rest():
     client = Mock()
-    seen: list[str] = []
-
-    def complete(messages, **_kwargs):
-        user_msg = messages[-1]["content"]
-        seen.append(user_msg)
-        if " a a a" in user_msg:
-            return ""
-        if " b b b" in user_msg:
-            return "Later chapters."
-        return "Incomplete book synopsis."
-
-    client.complete.side_effect = complete
-    cfg = Config.from_dict({"pipeline": {"prescan_concurrency": concurrency}})
-    result = Synopsizer(client, cfg).book_synopsis([" a" * 7000, " b" * 7000], "")
+    client.complete.side_effect = ["", "Later chapters.", "Incomplete book synopsis."]
+    result = Synopsizer(client, Config()).book_synopsis([" a" * 7000, " b" * 7000], "")
     assert result == ""
-    assert client.complete.call_count == expected_calls
-    assert all("Later chapters." not in msg for msg in seen)
+    assert client.complete.call_count == 1
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -201,20 +187,15 @@ def test_changed_digest_invalidates_book_cache(tmp_path):
     )
 
 
-def test_failed_regeneration_falls_back_to_saved_synopsis_and_retries_next_run(tmp_path):
+def test_failed_regeneration_keeps_existing_analysis_but_does_not_inject_stale_synopsis(tmp_path):
     service, store, runtime = _service(tmp_path)
     service.ensure_understanding(store)
     runtime.analyzer.style_brief.return_value = "New style."
     runtime.synopsizer.book_synopsis.return_value = ""
-    assert service.ensure_understanding(store) == "Whole-book synopsis."
+    assert service.ensure_understanding(store) == ""
     analysis = store.load_analysis()
     assert analysis is not None
     assert analysis["book_synopsis"] == "Whole-book synopsis."
-    events = [
-        event for event in store.list_events() if event.get("event") == "book_synopsis_failed"
-    ]
-    assert events and events[-1]["fallback"] == "stale_saved"
-    # Metadata was not updated, so the next run retries regeneration.
     runtime.synopsizer.book_synopsis.return_value = "Revised synopsis."
     assert service.ensure_understanding(store) == "Revised synopsis."
 
@@ -313,16 +294,10 @@ def test_book_synopsis_uses_configured_reduce_budget_for_groups(budget, calls):
 def test_book_synopsis_splits_oversized_digest_by_configured_reduce_budget():
     config = Config.from_dict({"pipeline": {"synopsis_reduce_tokens": 8}})
     agent = Synopsizer(FakeClient(), config)
-
-    def synth(group, *_args, **_kwargs):
-        if group == ["First.", "Second."]:
-            return "Complete."
-        return "First." if count_tokens(group[0]) == 4 else "Second."
-
-    agent._synth = Mock(side_effect=synth)
+    agent._synth = Mock(side_effect=["First.", "Second.", "Complete."])
     digest = " x" * 9
     assert agent.book_synopsis([digest], "") == "Complete."
-    chunks = sorted((call.args[0][0] for call in agent._synth.call_args_list[:2]), key=count_tokens)
+    chunks = [call.args[0][0] for call in agent._synth.call_args_list[:2]]
     assert "".join(chunks) == digest.strip()
     assert [count_tokens(chunk) for chunk in chunks] == [4, 5]
     assert agent._synth.call_args.args[0] == ["First.", "Second."]
@@ -358,18 +333,12 @@ def test_digest_merge_groups_use_tokens_including_separators():
 
 def test_oversized_book_digest_is_balanced_without_losing_its_ending():
     agent = Synopsizer(FakeClient(), Config())
-
-    def synth(group, *_args, **_kwargs):
-        if group == ["First.", "Second."]:
-            return "Complete."
-        return "First." if count_tokens(group[0]) == 6000 else "Second."
-
-    agent._synth = Mock(side_effect=synth)
+    agent._synth = Mock(side_effect=["First.", "Second.", "Complete."])
     digest = " x" * 12001
     assert agent.book_synopsis([digest], "") == "Complete."
     groups = [call.args[0] for call in agent._synth.call_args_list[:2]]
     assert [len(group) for group in groups] == [1, 1]
-    chunks = sorted((group[0] for group in groups), key=count_tokens)
+    chunks = [group[0] for group in groups]
     assert "".join(chunks) == digest.strip()
     assert [count_tokens(chunk) for chunk in chunks] == [6000, 6001]
     assert agent._synth.call_args.args[0] == ["First.", "Second."]
@@ -467,6 +436,20 @@ def test_synopsis_cache_tracks_the_model_configuration(tmp_path):
     runtime.synopsizer.book_synopsis.assert_called_once()
 
 
+def test_glossary_change_invalidates_synopsis_cache(tmp_path):
+    service, store, runtime = _service(tmp_path)
+    service.ensure_understanding(store)
+    term = GlossaryTerm(source="Citadel", target="城堡", type="place", note="Location")
+    store.upsert_term(term, chapter=0)
+    runtime.synopsizer.reset_mock()
+    service.ensure_understanding(store)
+    runtime.synopsizer.digest_chapter.assert_not_called()
+    runtime.synopsizer.book_synopsis.assert_called_once_with(
+        ["Chapter digest.", "Chapter digest."], "Restrained.", glossary=store.all_terms()
+    )
+    runtime.analyzer.style_brief.assert_called_with(store.load_analysis(), terms=store.all_terms())
+
+
 @pytest.mark.parametrize("change", ["version", "source"])
 @pytest.mark.parametrize("enabled", [False, True])
 def test_full_coverage_cache_requires_version_and_source_hash(tmp_path, change, enabled):
@@ -531,11 +514,11 @@ def test_legacy_sampled_cache_is_rebuilt_without_touching_targets_or_terms(tmp_p
     assert service.ensure_understanding(store) == "Whole-book synopsis."
     assert runtime.synopsizer.digest_chapter.call_count == 2
     runtime.synopsizer.book_synopsis.assert_called_once_with(
-        ["Chapter digest.", "Chapter digest."], "Restrained.", glossary=[]
+        ["Chapter digest.", "Chapter digest."], "Restrained.", glossary=terms
     )
     analysis = store.load_analysis()
     assert analysis is not None
-    assert analysis["book_synopsis_meta"]["version"] == 4
+    assert analysis["book_synopsis_meta"]["version"] == 2
     assert store.all_terms() == terms
     assert all(store.load_chapter(i).segments[0].target == "Saved target." for i in range(2))
 
@@ -603,309 +586,3 @@ def test_analysis_uses_digest_context_and_resumes_paid_result(tmp_path, enabled)
     agent._ask_json = Mock(return_value={})
     agent.analyze("Source prose.", chapter_digests=["Full digest."])
     assert "Full digest." in agent._ask_json.call_args.args[1]
-
-
-def test_glossary_growth_aliases_and_unrelated_terms_reuse_synopsis_on_resume(tmp_path):
-    service, store, runtime = _service(tmp_path)
-    runtime.synopsizer.digest_chapter.return_value = "Alice meets an envoy."
-    store.upsert_term(GlossaryTerm("Alice", "爱丽丝", type="person", gender="female"))
-    store.upsert_term(GlossaryTerm("Unrelated", "无关", type="place"))
-    assert service.ensure_understanding(store) == "Whole-book synopsis."
-    # Adding terms, notes, aliases, or editing/removing unmatched terms all reuse the synopsis.
-    store.upsert_term(GlossaryTerm("Bob", "鲍勃", type="person"))
-    store.upsert_term(GlossaryTerm("Alice", "爱丽丝", type="person", note="Lead."))
-    store.upsert_term(GlossaryTerm("Alice", "爱丽丝", type="person", aliases=["Ally"]))
-    store.resolve_term("Unrelated", "其他地方")
-    store.delete_term("Unrelated")
-    runtime.synopsizer.reset_mock()
-    assert service.ensure_understanding(store) == "Whole-book synopsis."
-    runtime.synopsizer.book_synopsis.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "revise",
-    [
-        lambda store: store.resolve_term("Alice", "艾丽斯"),
-        lambda store: (
-            store.delete_term("Alice"),
-            store.upsert_term(GlossaryTerm("Alice", "爱丽丝", type="place")),
-        ),
-        lambda store: (
-            store.delete_term("Alice"),
-            store.upsert_term(GlossaryTerm("Alice", "爱丽丝", type="person", gender="male")),
-        ),
-        lambda store: store.delete_term("Alice"),
-    ],
-    ids=["target", "type", "gender", "removed"],
-)
-def test_changed_or_removed_digest_matched_mapping_invalidates_cache(tmp_path, revise):
-    service, store, runtime = _service(tmp_path)
-    runtime.synopsizer.digest_chapter.return_value = "Alice arrives."
-    store.upsert_term(GlossaryTerm("Alice", "爱丽丝", type="person", gender="female"))
-    service.ensure_understanding(store)
-    revise(store)
-    runtime.synopsizer.reset_mock()
-    runtime.synopsizer.book_synopsis.return_value = "Revised synopsis."
-    assert service.ensure_understanding(store) == "Revised synopsis."
-    runtime.synopsizer.book_synopsis.assert_called_once()
-
-
-def test_version_3_synopsis_snapshot_is_reused_across_alias_and_unmatched_changes(tmp_path):
-    service, store, runtime = _service(tmp_path)
-    runtime.synopsizer.digest_chapter.return_value = "Alice arrives."
-    store.upsert_term(GlossaryTerm("Alice", "爱丽丝", type="person", gender="female"))
-    store.upsert_term(GlossaryTerm("Other", "他人", type="person"))
-    assert service.ensure_understanding(store) == "Whole-book synopsis."
-    analysis = store.load_analysis()
-    assert analysis is not None
-    # Simulate a legacy version-3 snapshot storing [target, type, gender, aliases] for all terms.
-    v3_snapshot = "preparation/synopsis-glossary/legacy-v3.json"
-    store.write_artifact(
-        v3_snapshot,
-        {
-            "Alice": ["爱丽丝", "person", "female", []],
-            "Other": ["他人", "person", "", []],
-        },
-    )
-    analysis["book_synopsis_meta"]["version"] = 3
-    analysis["book_synopsis_meta"]["glossary"] = v3_snapshot
-    store.save_analysis(analysis)
-
-    # Alias growth and unmatched term deletion keep reusing the v3 synopsis.
-    store.upsert_term(GlossaryTerm("Alice", "爱丽丝", type="person", aliases=["Ally"]))
-    store.delete_term("Other")
-    runtime.synopsizer.reset_mock()
-    assert service.ensure_understanding(store) == "Whole-book synopsis."
-    runtime.synopsizer.book_synopsis.assert_not_called()
-
-    # Changing a digest-matched term's target regenerates and upgrades to version 4.
-    store.resolve_term("Alice", "艾丽斯")
-    runtime.synopsizer.book_synopsis.return_value = "Upgraded synopsis."
-    assert service.ensure_understanding(store) == "Upgraded synopsis."
-    runtime.synopsizer.book_synopsis.assert_called_once()
-    upgraded = store.load_analysis()
-    assert upgraded is not None
-    assert upgraded["book_synopsis_meta"]["version"] == 4
-
-
-def test_unrelated_route_change_reuses_chapter_digests_and_synopsis(tmp_path):
-    ref = "deepseek/deepseek-flash"
-    service, store, runtime = _service(tmp_path)
-    runtime.config.llm = Config.from_dict(
-        {
-            "llm": {
-                "preset": "deepseek",
-                "routes": {
-                    "synopsis.chapter": {"model": ref, "thinking": "off"},
-                    "synopsis.book": {"model": ref, "thinking": "off"},
-                    "translation.body": {"model": ref, "thinking": "off"},
-                },
-            }
-        }
-    ).llm
-    service.ensure_understanding(store)
-    runtime.config.llm = Config.from_dict(
-        {
-            "llm": {
-                "preset": "deepseek",
-                "routes": {
-                    "synopsis.chapter": {"model": ref, "thinking": "off"},
-                    "synopsis.book": {"model": ref, "thinking": "off"},
-                    "translation.body": {"model": ref, "thinking": "max"},
-                },
-            }
-        }
-    ).llm
-    runtime.synopsizer.reset_mock()
-    assert service.ensure_understanding(store) == "Whole-book synopsis."
-    runtime.synopsizer.digest_chapter.assert_not_called()
-    runtime.synopsizer.book_synopsis.assert_not_called()
-
-
-def test_book_synopsis_parallel_reduce_preserves_deterministic_group_order():
-    import threading
-    import time
-
-    config = Config.from_dict(
-        {"pipeline": {"synopsis_reduce_tokens": 20, "prescan_concurrency": 4}}
-    )
-    agent = Synopsizer(FakeClient(), config)
-    lock = threading.Lock()
-    active = 0
-    peak_active = 0
-    barrier = threading.Barrier(2, timeout=5)
-    merge_inputs: list[list[str]] = []
-
-    def synth(group, *_args, **_kwargs):
-        nonlocal active, peak_active
-        if len(group) > 1 or group[0].startswith("S"):
-            merge_inputs.append(list(group))
-            return "Final."
-        idx = int(group[0].split()[0].removeprefix("G"))
-        with lock:
-            active += 1
-            peak_active = max(peak_active, active)
-        try:
-            if idx < 2:
-                barrier.wait()
-            # Finish later groups before earlier ones so out-of-order completion is exercised.
-            time.sleep(0.03 * (5 - idx))
-            return f"S{idx}"
-        finally:
-            with lock:
-                active -= 1
-
-    agent._synth = Mock(side_effect=synth)
-    digests = [f"G{i}" + " w" * 12 for i in range(6)]
-    assert agent.book_synopsis(digests, "Style.") == "Final."
-    assert peak_active >= 2
-    assert merge_inputs == [["S0", "S1", "S2", "S3", "S4", "S5"]]
-
-
-@pytest.mark.parametrize("bad_output", ["", " x" * 20])
-def test_book_synopsis_parallel_reduce_stops_scheduling_after_invalid_group(bad_output):
-    import threading
-    import time
-
-    config = Config.from_dict(
-        {"pipeline": {"synopsis_reduce_tokens": 12, "prescan_concurrency": 2}}
-    )
-    agent = Synopsizer(FakeClient(), config)
-    lock = threading.Lock()
-    started: list[int] = []
-    finished: list[int] = []
-
-    def synth(group, *_args, **_kwargs):
-        idx = int(group[0].split()[0].removeprefix("G"))
-        with lock:
-            started.append(idx)
-        if idx == 0:
-            return bad_output
-        time.sleep(0.05)
-        with lock:
-            finished.append(idx)
-        return f"S{idx}"
-
-    agent._synth = Mock(side_effect=synth)
-    digests = [f"G{i}" + " w" * 8 for i in range(10)]
-    assert agent.book_synopsis(digests, "Style.") == ""
-    # Group 0 failed immediately; at most the initial 2-worker window (plus at most 1 racing slot)
-    # should ever start, and all started non-failing calls must be drained before return.
-    assert len(started) <= 3
-    assert set(started) - {0} == set(finished)
-
-
-def test_book_synopsis_parallel_reduce_drains_and_raises_earliest_exception():
-    import threading
-    import time
-
-    config = Config.from_dict(
-        {"pipeline": {"synopsis_reduce_tokens": 12, "prescan_concurrency": 3}}
-    )
-    agent = Synopsizer(FakeClient(), config)
-    lock = threading.Lock()
-    started: list[int] = []
-    drained = threading.Event()
-    barrier = threading.Barrier(2, timeout=5)
-
-    def synth(group, *_args, **_kwargs):
-        idx = int(group[0].split()[0].removeprefix("G"))
-        with lock:
-            started.append(idx)
-        if idx in (0, 1):
-            barrier.wait()
-        if idx == 0:
-            time.sleep(0.02)
-            raise RuntimeError("group-0 boom")
-        if idx == 1:
-            raise ValueError("group-1 boom")
-        time.sleep(0.05)
-        drained.set()
-        return f"S{idx}"
-
-    agent._synth = Mock(side_effect=synth)
-    digests = [f"G{i}" + " w" * 8 for i in range(10)]
-    with pytest.raises(RuntimeError, match="group-0 boom"):
-        agent.book_synopsis(digests, "Style.")
-    # In-flight group 2 must have finished draining and later groups must not have been submitted.
-    assert drained.is_set()
-    assert len(started) <= 4
-
-
-def test_book_synopsis_inline_fast_path_and_digest_chapter_no_nested_pool(monkeypatch):
-    from wenyi_core.agents import synopsis as synopsis_mod
-
-    pool_calls = 0
-    real_pool = synopsis_mod.ThreadPoolExecutor
-
-    def spy_pool(*args, **kwargs):
-        nonlocal pool_calls
-        pool_calls += 1
-        return real_pool(*args, **kwargs)
-
-    monkeypatch.setattr(synopsis_mod, "ThreadPoolExecutor", spy_pool)
-
-    # prescan_concurrency=1 runs book_synopsis inline without spawning a pool.
-    cfg_serial = Config.from_dict(
-        {"pipeline": {"synopsis_reduce_tokens": 12, "prescan_concurrency": 1}}
-    )
-    agent_serial = Synopsizer(FakeClient(), cfg_serial)
-    agent_serial._synth = Mock(return_value="Ok.")
-    assert agent_serial.book_synopsis(["a" * 10 + " w" * 8, "b" * 10 + " w" * 8], "") == "Ok."
-    assert pool_calls == 0
-
-    # Single-group book_synopsis also skips pool creation even when concurrency > 1.
-    cfg_par = Config.from_dict(
-        {"pipeline": {"synopsis_reduce_tokens": 100, "prescan_concurrency": 4}}
-    )
-    agent_par = Synopsizer(FakeClient(), cfg_par)
-    agent_par._synth = Mock(return_value="Ok.")
-    assert agent_par.book_synopsis(["short a", "short b"], "") == "Ok."
-    assert pool_calls == 0
-
-    # digest_chapter runs inside BookUnderstandingService's worker pool, so its internal _reduce
-    # must stay inline (max_workers=1) and never spawn a nested ThreadPoolExecutor.
-    cfg_ch = Config.from_dict(
-        {
-            "pipeline": {
-                "synopsis_source_tokens": 8,
-                "synopsis_reduce_tokens": 12,
-                "prescan_concurrency": 4,
-            }
-        }
-    )
-    agent_ch = Synopsizer(FakeClient(), cfg_ch)
-    agent_ch._ask_text = Mock(return_value="Short.")
-    assert agent_ch.digest_chapter(" x" * 24) == "Short."
-    assert pool_calls == 0
-
-
-def test_chapter_digest_route_change_rebuilds_chapter_digests(tmp_path):
-    ref = "deepseek/deepseek-flash"
-    service, store, runtime = _service(tmp_path)
-    runtime.config.llm = Config.from_dict(
-        {
-            "llm": {
-                "preset": "deepseek",
-                "routes": {
-                    "synopsis.chapter": {"model": ref, "thinking": "off"},
-                    "synopsis.book": {"model": ref, "thinking": "off"},
-                },
-            }
-        }
-    ).llm
-    service.ensure_understanding(store)
-    runtime.config.llm = Config.from_dict(
-        {
-            "llm": {
-                "preset": "deepseek",
-                "routes": {
-                    "synopsis.chapter": {"model": ref, "thinking": "low"},
-                    "synopsis.book": {"model": ref, "thinking": "off"},
-                },
-            }
-        }
-    ).llm
-    runtime.synopsizer.reset_mock()
-    service.ensure_understanding(store)
-    assert runtime.synopsizer.digest_chapter.call_count == 2

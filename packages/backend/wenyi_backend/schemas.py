@@ -85,13 +85,6 @@ class PreviewChapter(BaseModel):
     word_count: int
 
 
-class SkippedBoilerplateItem(BaseModel):
-    chapter_index: int
-    segment_index: int
-    rule: str
-    source: str
-
-
 class UploadPreview(BaseModel):
     title: str
     fmt: str
@@ -99,8 +92,6 @@ class UploadPreview(BaseModel):
     total_word_count: int
     source_lang: Optional[str] = None
     chapters: list[PreviewChapter] = Field(default_factory=list)
-    skipped_boilerplate_count: int = 0
-    skipped_boilerplate: list[SkippedBoilerplateItem] = Field(default_factory=list)
 
 
 class StartTranslation(RequestModel):
@@ -228,7 +219,6 @@ class TermIn(RequestModel):
     gender: str = ""
     aliases: list[str] = []
     note: str = ""
-    status: Literal["ok", "context_dependent"] = "ok"
 
 
 class TermPage(BaseModel):
@@ -247,11 +237,10 @@ class ConflictOut(BaseModel):
     proposed_target: Optional[str]
     chapter: Optional[int]
     note: Optional[str] = None
-    conflict_count: int = 1
 
 
 class ResolveConflict(RequestModel):
-    decision: Literal["current", "proposed", "custom", "context_dependent"]
+    decision: Literal["current", "proposed", "custom"]
     target: Optional[str] = None
 
 

@@ -9,14 +9,7 @@ from dataclasses import asdict, dataclass
 from types import MappingProxyType
 from typing import Any
 
-from .configuration import (
-    LLMConfig,
-    ModelConfig,
-    ProviderConfig,
-    _located_error,
-    effective_context_window,
-    split_model_ref,
-)
+from .configuration import LLMConfig, ModelConfig, ProviderConfig, _located_error, split_model_ref
 from .operations import OPERATIONS, require_operation
 from .registry import provider_spec
 from .transport import ResolvedModel
@@ -47,7 +40,6 @@ class ResolvedRoute:
     model_identity: str
     fingerprint: str
     fallbacks: tuple[str, ...] = ()
-    context_window: int | None = None
 
     def request_model(self) -> ResolvedModel:
         options = (
@@ -140,7 +132,6 @@ def resolve_model(
             {"operation": operation, "protocol": spec.protocol_version, "inference": physical_model}
         ),
         fallbacks,
-        effective_context_window(connection.kind, remote_model, model.context_window),
     )
 
 
@@ -156,36 +147,6 @@ def operation_route(
         fallbacks=tuple(route.fallbacks),
         output_hint=output_hint,
         thinking=route.thinking,
-    )
-
-
-def escalate_route_thinking(
-    config: LLMConfig,
-    route: ResolvedRoute,
-    *,
-    steps: int = 1,
-    output_hint: int | None = None,
-) -> ResolvedRoute:
-    """Return a higher-thinking route along the adapter's ladder when supported, else ``route``."""
-    if steps <= 0:
-        return route
-    connection = config.providers[route.provider]
-    adapter = provider_spec(route.provider_kind).adapter_type()
-    control = adapter.route_thinking(connection, route.model)
-    if control is None:
-        return route
-    resolved_options = json.loads(route.options_json)
-    next_level = control.escalate(resolved_options, steps=steps)
-    if next_level is None:
-        return route
-    return model_route(
-        config,
-        route.operation,
-        route.profile,
-        origin=f"{route.origin} (escalated:{next_level})",
-        fallbacks=route.fallbacks,
-        output_hint=output_hint,
-        thinking=next_level,
     )
 
 

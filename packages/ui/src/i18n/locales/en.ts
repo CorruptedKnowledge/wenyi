@@ -145,13 +145,6 @@ const en = {
   "events.exportedFiles": "Exported files: {files}",
   "events.projectInitializedChapters":
     "Project initialized — chapters: {count}",
-  "events.glossaryBibleCompiled":
-    "Book Bible compiled ({seeded} terms, {quotes} quotes)",
-  "events.glossaryBibleReused": "Book Bible reused ({seeded} terms)",
-  "events.glossaryBibleCheckpointReused":
-    "Resumed Book Bible compilation from its checkpoint ({seeded} terms)",
-  "events.consistencySweepCompleted":
-    "Consistency sweep completed ({glossary} glossary, {drift} drift fixes)",
   "events.noEventsYet": "No events yet.",
   "export.exportTaskSubmitted": "Export task submitted",
   "export.saveAs": "Save as",
@@ -222,11 +215,6 @@ const en = {
   "glossary.aiSuggestion": "AI suggestion:",
   "glossary.keepCurrent": "Keep current",
   "glossary.acceptSuggestion": "Accept suggestion",
-  "glossary.markContextDependent": "Mark context-dependent",
-  "glossary.contextDependent": "Context-dependent",
-  "glossary.fixedTranslation": "Fixed mapping",
-  "glossary.translationPolicy": "Mapping mode",
-  "glossary.conflictBadge": "Conflict",
   "glossary.added": "Added",
   "glossary.couldNotAddTerm": "Could not add term: {error}",
   "glossary.requiredSourceTerm": "Source term *",
@@ -282,7 +270,6 @@ const en = {
   "common.startTranslation": "Start translation",
   "progress.pause": "Pause",
   "progress.resumeTask": "Resume task",
-  "progress.resumeNow": "Resume now",
   "progress.loading": "Loading",
   "progress.progressConnection": "Progress connection",
   "progress.live": "Live",
@@ -343,7 +330,6 @@ const en = {
   "common.queued": "Queued",
   "workflowPanel.currentWorkflow": "Current workflow",
   "workflowPanel.waitingForProgressUpdates": "Waiting for progress updates",
-  "workflowPanel.autoResumeScheduled": "Automatic retry scheduled at {time}",
   "createProject.precisionMode": "Three drafts + synthesis",
   "createProject.glossaryNotes": "Incremental glossary notes",
   "createProject.glossaryNotesHint": "Update glossary notes with source references after each batch. This uses additional model tokens.",
@@ -536,30 +522,6 @@ const en = {
   "settings.operationModel": "Model: {operation}",
   "settings.bookUnderstanding": "Book understanding",
   "settings.polishing": "Polishing",
-  "settings.consistencySweep": "Book-wide consistency sweep",
-  "settings.consistencySweepHelp":
-    "After all chapters finish, patch missed glossary terms and reconcile cross-chapter title or epithet drift.",
-  "settings.deterministicHygiene": "Deterministic formatting hygiene",
-  "settings.deterministicHygieneHelp":
-    "Repair leaked \\n escapes after each chapter. Punctuation, line layout and names are left as translated.",
-  "settings.glossaryMode": "Glossary mode",
-  "settings.glossaryModeHelp":
-    "Incremental extracts terms batch by batch. Compiled pre-compiles a book-wide glossary, conventions, and repeated quotes before translation so chapters can run in parallel.",
-  "settings.glossaryModeIncremental": "Incremental (batch by batch)",
-  "settings.glossaryModeCompiled": "Compiled Book Bible",
-  "settings.polishMode": "Polishing mode",
-  "settings.polishModeHelp":
-    "Full rewrites every batch. Sparse audits each batch and only rewrites spans with detected meaning, term, voice, or formatting defects.",
-  "settings.polishModeFull": "Full rewrite",
-  "settings.polishModeSparse": "Sparse semantic edit",
-  "settings.chapterConcurrency": "Chapter concurrency",
-  "settings.chapterConcurrencyHelp":
-    "Number of chapters translated in parallel. Available when Glossary mode is Compiled Book Bible.",
-  "settings.batchGlossary": "Batch glossary",
-  "settings.batchGlossaryHelp":
-    "Full sends every glossary term to each translation and polish batch. Relevant sends only entries matching the batch's source, following-source reference, annotations, and chapter digest (recommended for long books); whole-book review still receives the full glossary.",
-  "settings.batchGlossaryAll": "Full glossary",
-  "settings.batchGlossaryRelevant": "Relevant to each batch",
   "settings.applyAutofixesToTheSavedTranslation":
     "Apply autofixes to the saved translation after review",
   "settings.paragraphAnnotationAlignment": "Paragraph annotation alignment",
@@ -644,8 +606,6 @@ const en = {
   "progress.stage.prescan": "Prescanning chapters…",
   "progress.stage.style": "Analysing the book's style…",
   "progress.stage.synopsis": "Generating the whole-book synopsis…",
-  "progress.stage.compilingBible": "Compiling Book Bible…",
-  "progress.stage.consistencySweep": "Running cross-chapter consistency sweep…",
   "progress.stage.chapter": "Chapter {count}",
   "progress.stage.translationDone": "Translation complete",
   "progress.stage.assembling": "Assembling the translation…",
@@ -656,7 +616,6 @@ const en = {
   "progress.stage.arbitration": "Resolving conflicts, round {round}",
   "progress.stage.shadowRevision": "Shadow revision, round {round}",
   "progress.stage.publishingAutofix": "Publishing the review autofixes",
-  "progress.stage.outagePaused": "Paused after provider outage",
   "workflow.languageDetection": "Language detection",
   "workflow.styleAnalysis": "Style analysis",
   "workflow.translate": "Translate chapters in batches",

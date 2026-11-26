@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Any
 
 from .genres import DEFAULT_GENRE, compose
@@ -67,85 +66,17 @@ def _profile(language: str, ancestors: tuple[str, ...], *, genre: str) -> dict[s
     return {**base, **data, "policy": inherited, "_policy_origins": origins}
 
 
-def glossary_context_dependent_sources(code: str) -> frozenset[str]:
-    """Return source forms whose translation depends on speaker and listener.
-
-    Self-references and forms of address such as Chinese 孤 or 大人 have no stable
-    book-wide rendering, so automatic glossary extraction must not store them.
-    """
-    if not normalize_language(code):
-        return frozenset()
-    values = profile(code).get("glossary_context_dependent_sources", [])
-    return frozenset(value for value in values if isinstance(value, str) and value.strip())
-
-
-def glossary_single_character_names_only(code: str) -> bool:
-    """Return True when one-character sources are mostly words, not names (e.g. Chinese)."""
-    return bool(normalize_language(code)) and (
-        profile(code).get("glossary_single_character_names_only") is True
-    )
-
-
-@lru_cache(maxsize=64)
-def glossary_generic_target_words(code: str) -> frozenset[str]:
-    """Return target-language words that never identify one character or thing.
-
-    A target made only of such words, like English "I", "your son" or "Your Excellency",
-    is a pronoun or a bare title whose wording depends on who is speaking.
-    """
-    if not normalize_language(code):
-        return frozenset()
-    values = profile(code).get("glossary_generic_target_words", [])
-    return frozenset(
-        value.casefold() for value in values if isinstance(value, str) and value.strip()
-    )
-
-
-@lru_cache(maxsize=64)
-def inline_gloss_markers(code: str) -> tuple[str, ...]:
-    """Return the words a translator uses to open an inline note, like English "(lit. ...".
-
-    A language without markers gets no inline-gloss alert: a plain parenthetical is ordinary
-    prose in many styles, so only an explicit note counts as an inserted gloss.
-    """
-    if not normalize_language(code):
-        return ()
-    values = profile(code).get("inline_gloss_markers", [])
-    return tuple(value.strip() for value in values if isinstance(value, str) and value.strip())
-
-
 def label(code: str) -> str:
     return profile(code)["label"] if normalize_language(code) else "the source language"
-
-
-def resolve_pair_key(src: str, tgt: str) -> str | None:
-    """Resolve the best matching pair key in ``pairs/registry.json``, falling back to base tags."""
-    norm_src = normalize_language(src)
-    norm_tgt = require_language(tgt)
-    pairs = read_json("pairs/registry.json")
-    candidates = [f"{norm_src}__{norm_tgt}"]
-    src_base = norm_src.split("-", 1)[0] if "-" in norm_src else norm_src
-    tgt_base = norm_tgt.split("-", 1)[0] if "-" in norm_tgt else norm_tgt
-    for pair in (
-        f"{norm_src}__{tgt_base}",
-        f"{src_base}__{norm_tgt}",
-        f"{src_base}__{tgt_base}",
-    ):
-        if pair not in candidates:
-            candidates.append(pair)
-    for pair in candidates:
-        if pair in pairs:
-            return pair
-    return None
 
 
 def honorific_rule(src: str, tgt: str) -> str:
     """Select forms-of-address guidance from the language pair, not user configuration."""
     rule = read_json("shared/honorific.json")["rule"]
-    pair = resolve_pair_key(src, tgt)
-    if pair is not None:
-        pairs = read_json("pairs/registry.json")
-        rule = read_json(f"pairs/{pairs[pair]}").get("honorific", rule)
+    pair = f"{normalize_language(src)}__{require_language(tgt)}"
+    pairs = read_json("pairs/registry.json")
+    if pair in pairs:
+        rule = read_json(f"pairs/{pair}.json").get("honorific", rule)
     return rule
 
 

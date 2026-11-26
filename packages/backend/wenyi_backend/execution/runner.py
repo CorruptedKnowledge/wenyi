@@ -17,16 +17,9 @@ from wenyi_core.events import ProgressPayload
 from wenyi_core.llm.base import LLMClient
 from wenyi_core.llm.limits import RequestCancelled, RequestStopped
 
-from ..emitters import publish_error, publish_outage_pause, redis_progress_fn
+from ..emitters import publish_error, redis_progress_fn
 from ..live_statistics import LiveStatistics
 from .contracts import ExecutionDependencies, ExecutionRequest
-from .outage import (
-    ProviderOutageExhausted,
-    auto_resume_exhausted,
-    auto_resume_schedule,
-    is_outage_interrupt,
-    outage_attempt,
-)
 
 log = logging.getLogger(__name__)
 CANCEL_DRAIN_WARNING_SECONDS = 30.0
@@ -57,20 +50,10 @@ class PauseRequested(KeyboardInterrupt):
 
 
 @dataclass(frozen=True)
-class OutagePause:
-    """Automatic retry scheduled after a resumable provider outage paused the run."""
-
-    attempt: int
-    delay_seconds: int
-    next_retry_at: str
-
-
-@dataclass(frozen=True)
 class WorkflowOutcome:
     status: str
     project_status: str | None = None
     error: BaseException | None = None
-    outage: OutagePause | None = None
 
 
 def record_terminal_status(
@@ -157,14 +140,6 @@ def execute(
 
         resources.callback(stop_watcher)
         emitter = redis_progress_fn(cache, pid, kind=kind, run_id=run_id)
-        # A model response during this job ends any outage streak carried in from earlier
-        # automatic resumes. Progress counts are not used: resuming Review reports rising
-        # chapter counts while it only reloads saved state.
-        provider_answered = threading.Event()
-
-        def note_provider_answer(event: str, **_data: object) -> None:
-            if event == "llm_request_completed":
-                provider_answered.set()
 
         def progress(
             done: int, total: int, label: str, payload: ProgressPayload | None = None
@@ -202,7 +177,6 @@ def execute(
                         live.bind_client(value)
                         value.set_event_sink(storage.log_event)
                         scope.enter_context(value.observe_events(dependencies.metrics.record_event))
-                        scope.enter_context(value.observe_events(note_provider_answer))
                         if stop.is_set():
                             value.cancel()
 
@@ -218,37 +192,6 @@ def execute(
                 storage.log_event("task_paused", kind=kind, run_id=run_id, reason=str(error))
                 return WorkflowOutcome("paused", error=error)
             except BaseException as error:
-                original = error
-                outage = is_outage_interrupt(error)
-                attempt = 0 if provider_answered.is_set() else outage_attempt(request.params)
-                if outage and auto_resume_exhausted(attempt):
-                    error = ProviderOutageExhausted(original, attempts=attempt)
-                elif outage:
-                    delay_seconds, next_retry_at = auto_resume_schedule(attempt)
-                    log.warning(
-                        "Pipeline paused after resumable provider outage: kind=%s run_id=%s "
-                        "attempt=%s retry_in=%ss error=%s",
-                        kind,
-                        run_id,
-                        attempt + 1,
-                        delay_seconds,
-                        error,
-                    )
-                    storage.log_event(
-                        "task_paused_outage",
-                        kind=kind,
-                        run_id=run_id,
-                        error=str(error),
-                        error_type=type(error).__name__,
-                        attempt=attempt + 1,
-                        delay_seconds=delay_seconds,
-                        next_retry_at=next_retry_at,
-                    )
-                    return WorkflowOutcome(
-                        "paused",
-                        error=error,
-                        outage=OutagePause(attempt + 1, delay_seconds, next_retry_at),
-                    )
                 # Include native panics, which PyO3 wraps in BaseException.
                 log.exception("Pipeline task failed: kind=%s run_id=%s", kind, run_id)
                 storage.log_event(
@@ -258,9 +201,7 @@ def execute(
                     error=str(error),
                     error_type=type(error).__name__,
                 )
-                if error is original:
-                    raise
-                raise error from original
+                raise
 
 
 def _publish_outcome(
@@ -275,14 +216,8 @@ def _publish_outcome(
     ):
         return
     pid, run_id = request.project_id, request.run_id
-    outage = outcome.outage
     failed = outcome.error if outcome.status == "error" else None
-    if failed is not None:
-        code = error_code(failed)
-    elif outage is not None and outcome.error is not None:
-        code = error_code(outcome.error)
-    else:
-        code = "none"
+    code = error_code(failed) if failed is not None else "none"
     dependencies.metrics.record_task(
         status=outcome.status, code=code, identity=f"{pid}:{run_id}" if run_id else None
     )
@@ -291,17 +226,6 @@ def _publish_outcome(
         try:
             if failed is not None:
                 publish_error(cache, pid, code=code, message=str(failed), run_id=run_id)
-            if outage is not None:
-                publish_outage_pause(
-                    cache,
-                    pid,
-                    kind=request.kind,
-                    run_id=run_id,
-                    next_retry_at=outage.next_retry_at,
-                    delay_seconds=outage.delay_seconds,
-                    attempt=outage.attempt,
-                    message=str(outcome.error or ""),
-                )
             cache.publish(
                 f"project:{pid}",
                 json.dumps({"kind": "state", "project_id": pid, "run_id": run_id}),
@@ -311,18 +235,6 @@ def _publish_outcome(
     except Exception:
         # The durable result is authoritative; a transport failure cannot change it.
         pass
-    if outage is not None and dependencies.schedule_resume is not None:
-        try:
-            dependencies.schedule_resume(
-                request, outage.attempt, outage.delay_seconds, outage.next_retry_at
-            )
-        except Exception:
-            log.warning(
-                "Could not schedule automatic resume: project_id=%s run_id=%s",
-                pid,
-                run_id,
-                exc_info=True,
-            )
 
 
 async def _run_owned(

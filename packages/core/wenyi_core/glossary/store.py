@@ -15,25 +15,17 @@ import tempfile
 import time
 import unicodedata
 from collections.abc import Iterable
-from functools import lru_cache
 from typing import Any
 
 from ..models.glossary import (
     SOURCE_ONLY_TYPES,
-    STATUS_CONFLICT,
-    STATUS_CONTEXT_DEPENDENT,
-    STATUS_OK,
     TYPE_APPELLATION,
     TYPE_FIXED_EXPR,
     TYPE_HONORIFIC,
-    TYPE_NAVIGATION,
     TYPE_PERSON,
     TYPE_SPEECH,
     TYPE_TERM,
     GlossaryTerm,
-    merge_context_senses,
-    normalize_term_status,
-    promote_navigation_term,
 )
 
 # The term record and its type tags moved to wenyi_core.models.glossary. They stay
@@ -41,26 +33,17 @@ from ..models.glossary import (
 _SOURCE_ONLY_TYPES = SOURCE_ONLY_TYPES
 
 __all__ = [
-    "STATUS_CONFLICT",
-    "STATUS_CONTEXT_DEPENDENT",
-    "STATUS_OK",
     "TYPE_APPELLATION",
     "TYPE_FIXED_EXPR",
     "TYPE_HONORIFIC",
-    "TYPE_NAVIGATION",
     "TYPE_PERSON",
     "TYPE_SPEECH",
     "TYPE_TERM",
     "GlossaryOccurrenceMatcher",
     "GlossaryStore",
     "GlossaryTerm",
-    "equivalent_targets",
-    "merge_context_senses",
-    "normalize_match_text",
     "search_term_page",
-    "source_matches_normalized",
     "source_matches_text",
-    "source_occurrence_spans",
     "term_match_sources",
 ]
 
@@ -101,7 +84,7 @@ CREATE TABLE IF NOT EXISTS term_conflicts (
 _RUBY_MARK_RE = re.compile(r"〘[^〙]*〙")
 
 
-def normalize_match_text(text: str) -> str:
+def _match_text(text: str) -> str:
     """Normalize width, compatibility forms and case for glossary matching.
     Strip embedded furigana so a reading inserted inside a word does not prevent that word
     from matching. The original ruby markup remains in the source template.
@@ -109,27 +92,6 @@ def normalize_match_text(text: str) -> str:
     if "〘" in text:
         text = _RUBY_MARK_RE.sub("", text)
     return unicodedata.normalize("NFKC", text).casefold()
-
-
-_match_text = normalize_match_text
-
-_LEADING_ARTICLE = re.compile(r"^the\s+")
-_TRAILING_PUNCTUATION = re.compile(r"[\s.!?。！？]+$")
-
-
-def equivalent_targets(left: str, right: str) -> bool:
-    """Treat targets differing only by case, spacing, a leading English "the" or a final
-    stop as the same translation, so automatic extraction does not log them as conflicts.
-    Only "the" is stripped: "A" and "An" also romanize Chinese names (阿紫, 安禄山).
-    """
-    if left == right:
-        return True
-
-    def key(value: str) -> str:
-        normalized = " ".join(normalize_match_text(value).split())
-        return _TRAILING_PUNCTUATION.sub("", _LEADING_ARTICLE.sub("", normalized))
-
-    return bool(key(left)) and key(left) == key(right)
 
 
 _WORD_BOUNDARY_SCRIPTS = ("LATIN", "GREEK", "CYRILLIC")
@@ -154,10 +116,9 @@ def search_term_page(
     return items, total
 
 
-@lru_cache(maxsize=1 << 14)
 def _source_pattern(key: str) -> re.Pattern[str] | None:
     """Build word boundaries for space-delimited scripts; return None for substring-matched
-    scripts. Keyed only on bounded glossary source strings (never paragraph text).
+    scripts.
     """
     if key.isascii():
         return re.compile(rf"(?<![a-z0-9_]){re.escape(key)}(?![a-z0-9_])")
@@ -174,52 +135,17 @@ def _source_pattern(key: str) -> re.Pattern[str] | None:
     return re.compile(f"{left_boundary}{re.escape(key)}{right_boundary}")
 
 
-@lru_cache(maxsize=1 << 14)
-def _compiled_source_key(source: str) -> tuple[str, re.Pattern[str] | None]:
-    """Return the normalized match key for ``source`` and its boundary pattern, if any.
-    Glossary sources recur across every segment and batch, so cache the normalization and
-    script detection instead of repeating them for each lookup.
-    """
-    key = _match_text(source).strip()
-    return key, (_source_pattern(key) if key else None)
-
-
-def raw_source_pattern(source: str) -> re.Pattern[str]:
-    """Match ``source`` verbatim in unnormalized text, on word boundaries where its script
-    is space-delimited, so Ann never matches inside Anna; CJK sources match as substrings.
-    """
-    key = source.strip()
-    escaped = re.escape(key)
-    if not key or _source_pattern(_match_text(key)) is None:
-        return re.compile(escaped)
-    left_boundary = r"(?<!\w)" if key[0].isalnum() else ""
-    right_boundary = r"(?!\w)" if key[-1].isalnum() else ""
-    return re.compile(f"{left_boundary}{escaped}{right_boundary}")
-
-
 def source_matches_text(source: str, text: str) -> bool:
     """Match source terms without matching inside longer words in space-delimited scripts.
     Use normalized substring matching for continuous scripts such as CJK. Check boundaries
     for ASCII, Latin, Greek and Cyrillic to avoid matching Ann inside Anna or a short
     Cyrillic word inside a longer one.
     """
-    key, pattern = _compiled_source_key(source)
+    key = _match_text(source).strip()
     if not key:
         return False
     normalized_text = _match_text(text)
-    if pattern is not None:
-        return pattern.search(normalized_text) is not None
-    return key in normalized_text
-
-
-def source_matches_normalized(source: str, normalized_text: str) -> bool:
-    """Match like ``source_matches_text`` against text already passed through
-    ``normalize_match_text``, so callers testing many terms normalize the text only once.
-    """
-    key, pattern = _compiled_source_key(source)
-    if not key:
-        return False
-    if pattern is not None:
+    if pattern := _source_pattern(key):
         return pattern.search(normalized_text) is not None
     return key in normalized_text
 
@@ -251,12 +177,12 @@ def trusted_match_sources(term: GlossaryTerm, all_terms: list[GlossaryTerm]) -> 
     ]
 
 
-def source_occurrence_spans(source: str, normalized_text: str) -> list[tuple[int, int]]:
+def _source_occurrence_spans(source: str, normalized_text: str) -> list[tuple[int, int]]:
     """Return nonoverlapping source-term spans in normalized text."""
-    key, pattern = _compiled_source_key(source)
+    key = _match_text(source).strip()
     if not key:
         return []
-    if pattern is not None:
+    if pattern := _source_pattern(key):
         return [match.span() for match in pattern.finditer(normalized_text)]
 
     spans: list[tuple[int, int]] = []
@@ -266,9 +192,6 @@ def source_occurrence_spans(source: str, normalized_text: str) -> list[tuple[int
         spans.append((index, end))
         start = end
     return spans
-
-
-_source_occurrence_spans = source_occurrence_spans
 
 
 def _merged_occurrence_count(spans: set[tuple[int, int]]) -> int:
@@ -435,46 +358,14 @@ class GlossaryStore:
                     ),
                 )
                 result = "inserted"
-            elif existing.status == STATUS_CONTEXT_DEPENDENT:
-                # Context-dependent terms accept multiple senses without raising conflicts.
-                merged_target = merge_context_senses(existing.target, term.target)
-                merged_aliases = sorted(set(existing.aliases) | set(term.aliases))
-                promoted_type, promoted_first_chapter = promote_navigation_term(
-                    existing, term, chapter
-                )
-                self.conn.execute(
-                    """UPDATE glossary SET target=?, type=?, first_chapter=?,
-                       reading=COALESCE(NULLIF(?,''),reading),
-                       gender=COALESCE(NULLIF(?,''),gender), aliases=?,
-                       note=COALESCE(NULLIF(?,''),note), updated_at=? WHERE source=?""",
-                    (
-                        merged_target or existing.target,
-                        promoted_type,
-                        promoted_first_chapter,
-                        term.reading,
-                        term.gender,
-                        json.dumps(merged_aliases, ensure_ascii=False),
-                        term.note,
-                        now,
-                        term.source,
-                    ),
-                )
-                result = "unchanged"
             elif existing.target == term.target:
-                # Merging aliases, filling missing fields, or promoting a navigation stub to
-                # a real entity type is not a conflict.
+                # Merging aliases or filling missing fields is not a conflict.
                 merged_aliases = sorted(set(existing.aliases) | set(term.aliases))
-                promoted_type, promoted_first_chapter = promote_navigation_term(
-                    existing, term, chapter
-                )
                 self.conn.execute(
-                    """UPDATE glossary SET type=?, first_chapter=?,
-                       reading=COALESCE(NULLIF(?,''),reading),
+                    """UPDATE glossary SET reading=COALESCE(NULLIF(?,''),reading),
                        gender=COALESCE(NULLIF(?,''),gender), aliases=?,
                        note=COALESCE(NULLIF(?,''),note), updated_at=? WHERE source=?""",
                     (
-                        promoted_type,
-                        promoted_first_chapter,
                         term.reading,
                         term.gender,
                         json.dumps(merged_aliases, ensure_ascii=False),
@@ -509,19 +400,13 @@ class GlossaryStore:
             (source, existing_target, proposed_target, chapter, time.time()),
         )
 
-    def resolve_term(self, source: str, target: str, *, status: str = STATUS_OK) -> bool:
-        """Resolve the final translation and status; report whether the term exists.
-
-        A resolution is a user decision, so ``first_chapter`` (extraction provenance) is
-        cleared and the entry is always sent, like an imported one.
+    def resolve_term(self, source: str, target: str) -> bool:
+        """Resolve the final translation and restore normal status; report whether the term
+        exists.
         """
-        resolved_status = normalize_term_status(status)
-        if resolved_status == STATUS_CONFLICT:
-            resolved_status = STATUS_OK
         cur = self.conn.execute(
-            "UPDATE glossary SET target=?, status=?, first_chapter=NULL, updated_at=? "
-            "WHERE source=?",
-            (target, resolved_status, time.time(), source),
+            "UPDATE glossary SET target=?, status='ok', updated_at=? WHERE source=?",
+            (target, time.time(), source),
         )
         if self._owns_connection:
             self.conn.commit()
@@ -577,7 +462,7 @@ class GlossaryStore:
             # Forms of address, verbal habits and fixed expressions carry tone or context. A bare-name alias
             # must not inject their derived translation into an ordinary address.
             keys = term_match_sources(term)
-            if any(source_matches_normalized(k, normalized_text) for k in keys):
+            if any(source_matches_text(k, normalized_text) for k in keys):
                 out.append(term)
         return out
 

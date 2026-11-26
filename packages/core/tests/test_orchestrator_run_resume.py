@@ -11,7 +11,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from wenyi_core.agents.glossary_extractor import ExtractionRequest
 from wenyi_core.llm.providers.fake import FakeClient
 from wenyi_core.llm.usage import UsageSample
 from wenyi_core.pipeline.orchestrator import Orchestrator
@@ -352,13 +351,6 @@ class TestSegmentLevelResume(unittest.TestCase):
                 patch.object(store, "all_terms", wraps=store.all_terms) as snapshots,
                 # Isolate translation snapshot reads from extraction's own glossary reads.
                 patch.object(orch._runtime.extractor, "extract_and_store", return_value={}),
-                patch.object(
-                    orch._runtime.extractor,
-                    "prepare_extraction",
-                    return_value=ExtractionRequest("", "", (), ()),
-                ),
-                patch.object(orch._runtime.extractor, "extract_candidates", return_value=[]),
-                patch.object(orch._runtime.extractor, "store_extracted", return_value={}),
                 patch.object(
                     orch._translation,
                     "extract_batch_glossary",

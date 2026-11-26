@@ -100,11 +100,7 @@ def _segment_render_maps(
             by_anchor[current_anchor] = _seg_text(segment)
             src_by_anchor[current_anchor] = segment.source
             kind_by_anchor[current_anchor] = segment.kind
-            stored_meta_by_anchor[current_anchor] = {
-                key: value
-                for key, value in segment.meta.items()
-                if key not in {"skip", "skip_reason"}
-            }
+            stored_meta_by_anchor[current_anchor] = segment.meta
         else:
             # Template chapters always carry anchors; reaching this branch means the
             # persisted state was truncated or corrupted. Fail loudly instead of

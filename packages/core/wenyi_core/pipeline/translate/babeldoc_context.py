@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import groupby
 
@@ -138,18 +137,13 @@ class BabeldocContext:
                 )[0]
         return caption
 
-    def recent_targets(
-        self,
-        segments: list[Segment],
-        end: int,
-        target: Callable[[Segment], str | None] = lambda segment: segment.target,
-    ) -> list[str | None]:
+    def recent_targets(self, segments: list[Segment], end: int) -> list[str | None]:
         """Rebuild only the consumed section prefix from formal, possibly aligned targets."""
         if end <= 0:
             return []
         section = self.sections[end - 1]
         return [
-            target(segment)
+            segment.target
             for index, segment in enumerate(segments[:end])
             if self.sections[index] == section and self.body[index]
         ]

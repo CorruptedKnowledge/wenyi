@@ -34,7 +34,6 @@ export function TermDetailsDialog({
     note: "",
     gender: "",
     aliases: "",
-    status: "ok" as "ok" | "context_dependent",
   });
 
   useEffect(() => {
@@ -47,7 +46,6 @@ export function TermDetailsDialog({
         note: term.note || "",
         gender: term.gender || "",
         aliases: (term.aliases || []).join(", "),
-        status: term.status === "context_dependent" ? "context_dependent" : "ok",
       });
     }
   }, [term]);
@@ -148,25 +146,6 @@ export function TermDetailsDialog({
               <SelectItem value="female">{tr("glossary.female")}</SelectItem>
               <SelectItem value="other">{tr("glossary.other")}</SelectItem>
               <SelectItem value="unknown">{tr("glossary.unknown")}</SelectItem>
-            </Select>
-          </div>
-          <div>
-            <Label>{tr("glossary.translationPolicy")}</Label>
-            <Select
-              value={form.status}
-              aria-label={tr("glossary.translationPolicy")}
-              disabled={readOnly}
-              onValueChange={(value) =>
-                setForm({
-                  ...form,
-                  status: value === "context_dependent" ? "context_dependent" : "ok",
-                })
-              }
-            >
-              <SelectItem value="ok">{tr("glossary.fixedTranslation")}</SelectItem>
-              <SelectItem value="context_dependent">
-                {tr("glossary.contextDependent")}
-              </SelectItem>
             </Select>
           </div>
         </div>

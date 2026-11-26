@@ -12,73 +12,12 @@ from ...agents.synopsis import Synopsizer
 from ...config import Config
 from ...events import ProgressFn
 from ...i18n.policy.models import content_hash
-from ...llm.routing import inference_snapshot
 from ...models.document import Chapter
-from ...models.glossary import TYPE_NAVIGATION, GlossaryTerm, normalize_gender
 from ...storage.protocol import Storage
 from ..run.runtime_usage import UsageCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 _DIGEST_VERSION = 2
-_SYNOPSIS_VERSION = 4
-_LEGACY_SYNOPSIS_VERSION = 3
-_CHAPTER_DIGEST_OPERATION = "synopsis.chapter"
-_SYNOPSIS_OPERATION = "synopsis.book"
-
-
-def _synopsis_mappings(matched: list[GlossaryTerm]) -> dict[str, list[str]]:
-    """Keep only the prompt-relevant ``[target, type, gender]`` fields for digest-matched terms."""
-    return {
-        term.source: [term.target, term.type, normalize_gender(term.gender)] for term in matched
-    }
-
-
-def _legacy_v3_mappings(
-    store: Storage, saved: dict, digests: list[str]
-) -> dict[str, list[str]] | None:
-    """Project a version-3 all-term snapshot onto the digest-matched ``[target, type, gender]`` view."""
-    terms: list[GlossaryTerm] = []
-    for source, fields in saved.items():
-        if (
-            not isinstance(source, str)
-            or not isinstance(fields, list)
-            or len(fields) < 4
-            or not isinstance(fields[0], str)
-            or not isinstance(fields[1], str)
-            or not isinstance(fields[2], str)
-            or not isinstance(fields[3], list)
-            or not all(isinstance(alias, str) for alias in fields[3])
-        ):
-            return None
-        terms.append(
-            GlossaryTerm(
-                source=source,
-                target=fields[0],
-                type=fields[1],
-                gender=fields[2],
-                aliases=list(fields[3]),
-            )
-        )
-    return _synopsis_mappings(store.terms_in(terms, "\n".join(digests)))
-
-
-def _mappings_unchanged(
-    store: Storage,
-    saved: object,
-    current: dict[str, list[str]],
-    *,
-    version: int,
-    digests: list[str],
-) -> bool:
-    """Accept added terms and alias/note edits, but not changed target/type/gender or removed digest terms."""
-    if not isinstance(saved, dict):
-        return False
-    projected: dict[str, list[str]] | None = (
-        _legacy_v3_mappings(store, saved, digests) if version == _LEGACY_SYNOPSIS_VERSION else saved
-    )
-    if projected is None:
-        return False
-    return all(current.get(source) == fields for source, fields in projected.items())
 
 
 def _digest_complete(chapter: Chapter) -> bool:
@@ -124,13 +63,8 @@ class BookUnderstandingService:
             return ""
 
         analysis = store.load_analysis() or {}
-        # Navigation titles are chapter headings, not entities worth synopsis mappings.
-        terms = sorted(
-            (term for term in store.all_terms() if term.type != TYPE_NAVIGATION),
-            key=lambda term: term.source,
-        )
-        matched_terms = store.terms_in(terms, "\n".join(digests))
-        mappings = _synopsis_mappings(matched_terms)
+        terms = sorted(store.all_terms(), key=lambda term: term.source)
+        style = self._analyzer.style_brief(analysis, terms=terms)
         inputs = {
             "language_policy": self._config.language_policy("analysis").task_fingerprint(
                 "book_synopsis"
@@ -140,70 +74,39 @@ class BookUnderstandingService:
                 for chapter in loaded
                 if chapter.text_segments
             ],
-            # Glossary-derived character lines are bound through the mapping snapshot below.
-            "style": self._analyzer.style_brief(analysis, terms=[]),
+            "style": style,
             "source_lang": self._config.source_lang,
             "target_lang": self._config.target_lang,
-            "routing": inference_snapshot(self._config.llm, (_SYNOPSIS_OPERATION,)),
+            "glossary": [
+                [term.source, term.target, term.type, term.gender, term.note] for term in terms
+            ],
+            "routing": self._config.llm.model_dump(mode="json"),
         }
         fingerprint = hashlib.sha256(
             json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
+        metadata = {"version": 2, "inputs_sha256": fingerprint}
         synopsis = analysis.get("book_synopsis", "")
-        previous_synopsis = (
-            synopsis.strip() if isinstance(synopsis, str) and synopsis.strip() else ""
-        )
-        saved = analysis.get("book_synopsis_meta")
-        saved_version = saved.get("version") if isinstance(saved, dict) else None
         if (
-            previous_synopsis
-            and isinstance(saved, dict)
-            and saved_version in {_SYNOPSIS_VERSION, _LEGACY_SYNOPSIS_VERSION}
-            and saved.get("inputs_sha256") == fingerprint
-            and isinstance(saved.get("glossary"), str)
-            and _mappings_unchanged(
-                store,
-                store.read_artifact(saved["glossary"]),
-                mappings,
-                version=saved_version,
-                digests=digests,
-            )
+            isinstance(synopsis, str)
+            and synopsis.strip()
+            and analysis.get("book_synopsis_meta") == metadata
         ):
             return synopsis
-        snapshot = "preparation/synopsis-glossary/" + content_hash(mappings) + ".json"
-        metadata = {
-            "version": _SYNOPSIS_VERSION,
-            "inputs_sha256": fingerprint,
-            "glossary": snapshot,
-        }
         if progress:
             progress(0, 0, "progress.stage.synopsis")
-        style = self._analyzer.style_brief(analysis, terms=matched_terms)
-        synopsis = self._synopsizer.book_synopsis(digests, style, glossary=matched_terms)
+        synopsis = self._synopsizer.book_synopsis(digests, style, glossary=terms)
         if synopsis:
-            # The snapshot is derived state; write it before the analysis that references it.
-            store.write_artifact(snapshot, mappings)
             analysis["book_synopsis"] = synopsis
             analysis["book_synopsis_meta"] = metadata
             store.save_analysis(analysis)
             store.log_event("book_synopsis_saved", synopsis=synopsis)
-            return synopsis
-        if previous_synopsis:
-            store.log_event(
-                "book_synopsis_failed",
-                reason="generation_failed",
-                fallback="stale_saved",
-            )
+        else:
+            store.log_event("book_synopsis_failed", reason="generation_failed")
             _LOGGER.warning(
-                "Whole-book synopsis regeneration failed; continuing this run with the previously "
-                "saved (stale) synopsis. Regeneration will be retried on the next prepare/translate run."
+                "Whole-book synopsis generation failed; translation continues with chapter digests. "
+                "The synopsis will be retried on the next prepare/translate run."
             )
-            return previous_synopsis
-        store.log_event("book_synopsis_failed", reason="generation_failed")
-        _LOGGER.warning(
-            "Whole-book synopsis generation failed; translation continues with chapter digests. "
-            "The synopsis will be retried on the next prepare/translate run."
-        )
         return synopsis
 
     def ensure_chapter_digests(
@@ -232,11 +135,10 @@ class BookUnderstandingService:
             for ci, ch in loaded.items()
             if ch.text_segments
         }
-        digest_routing = inference_snapshot(self._config.llm, (_CHAPTER_DIGEST_OPERATION,))
         fingerprint = content_hash(
             [
                 self._config.language_policy("analysis").task_fingerprint("chapter_digest"),
-                digest_routing,
+                self._config.llm.model_dump(mode="json"),
             ]
         )
         source_hashes = {
@@ -251,7 +153,7 @@ class BookUnderstandingService:
                         _DIGEST_VERSION,
                         source_hashes[ci],
                         fingerprint,
-                        digest_routing,
+                        self._config.llm.model_dump(mode="json"),
                     ]
                 )
                 + ".json"

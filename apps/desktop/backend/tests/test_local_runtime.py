@@ -968,60 +968,6 @@ def test_workflow_cached_progress_rejects_other_project_and_old_run(desktop):
     store.close()
 
 
-def test_desktop_auto_resume_fires_and_can_be_cancelled(catalog, monkeypatch):
-    from wenyi_backend.execution.contracts import ExecutionRequest
-    from wenyi_backend.workers import tasks
-    from wenyi_backend.workers.signing import SIGNATURE_FIELD, verify_task
-
-    async def run():
-        context = current_context()
-        runtime = LocalRuntime(catalog, context)
-        resumed = []
-        fired = asyncio.Event()
-
-        async def fake_run_auto_resume(ctx, **kwargs):
-            # The worker entry rejects unsigned payloads, so Desktop must sign its retry.
-            signature = kwargs.pop(SIGNATURE_FIELD)
-            assert verify_task("run_auto_resume", kwargs, signature, context.api_token)
-            resumed.append((kwargs["project_id"], kwargs["expected_run_id"], kwargs["attempt"]))
-            fired.set()
-            return True
-
-        monkeypatch.setattr(tasks, "run_auto_resume", fake_run_auto_resume)
-        await runtime.start()
-        try:
-            pid = project()
-            # Schedule a quick retry and confirm it fires once.
-            runtime.schedule_auto_resume(
-                ExecutionRequest("translation", pid, "run-1"),
-                1,
-                0,
-                datetime.now(timezone.utc).isoformat(),
-            )
-            await asyncio.wait_for(fired.wait(), 3)
-            assert resumed == [(pid, "run-1", 1)]
-
-            # Schedule a delayed retry and cancel it before it fires.
-            resumed.clear()
-            fired.clear()
-            runtime.schedule_auto_resume(
-                ExecutionRequest("translation", pid, "run-2"),
-                2,
-                60,
-                datetime.now(timezone.utc).isoformat(),
-            )
-            await asyncio.sleep(0.05)
-            assert pid in runtime._auto_resumes
-            runtime.cancel_auto_resume(pid)
-            await asyncio.sleep(0.05)
-            assert pid not in runtime._auto_resumes
-            assert resumed == []
-        finally:
-            await asyncio.wait_for(runtime.stop(), 3)
-
-    asyncio.run(run())
-
-
 def test_dispatcher_keeps_a_cancelled_checkpoint_writer_owned(catalog):
     pid, initial = initialize(catalog)
     initial.close()

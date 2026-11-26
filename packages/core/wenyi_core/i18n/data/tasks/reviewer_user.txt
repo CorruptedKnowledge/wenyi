@@ -1,3 +1,6 @@
+[Glossary]
+$glossary
+
 [Paragraph pairs] ($n paragraphs)
 $pairs
 

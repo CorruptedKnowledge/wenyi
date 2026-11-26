@@ -13,7 +13,7 @@ from ...agents.title_translator import TitleOutputError, TitleTranslator
 from ...events import ProgressFn, emit_progress
 from ...glossary.store import GlossaryStore
 from ...models.document import Chapter, uses_epub_template
-from ...models.glossary import TYPE_NAVIGATION, GlossaryTerm
+from ...models.glossary import GlossaryTerm
 from ...storage.protocol import Storage
 
 
@@ -201,42 +201,38 @@ def plan_titles(
                 plan.pending.append(
                     TitleRequest(epub_meta, book_title, field="book_title_translated")
                 )
-        for source_key, target_key in _EPUB_LIST_FIELDS:
-            _plan_list_field(plan, epub_meta, source_key, target_key)
-    return plan
-
-
-# Positional EPUB metadata lists translated through the title prompt: short labels and names,
-# never prose.
-_EPUB_LIST_FIELDS = (
-    ("epub_subjects", "epub_subjects_translated"),
-    ("epub_creators", "epub_creators_translated"),
-    ("epub_nav_titles", "epub_nav_titles_translated"),
-)
-
-
-def _plan_list_field(
-    plan: TitlePlan, epub_meta: dict[str, Any], source_key: str, target_key: str
-) -> None:
-    """Queue missing positional translations while keeping already saved slots."""
-    raw = epub_meta.get(source_key)
-    if not isinstance(raw, list) or not raw:
-        return
-    sources = [_flat(item) for item in raw if isinstance(item, str) and _flat(item)]
-    existing = epub_meta.get(target_key)
-    aligned = existing if isinstance(existing, list) and len(existing) == len(sources) else None
-    for idx, source in enumerate(sources):
-        if aligned is not None and isinstance(aligned[idx], str) and aligned[idx].strip():
-            continue
-        plan.pending.append(
-            TitleRequest(
-                epub_meta,
-                source,
-                field=target_key,
-                list_index=idx,
-                list_size=len(sources),
+        raw_subjects = epub_meta.get("epub_subjects")
+        if isinstance(raw_subjects, list) and raw_subjects:
+            subjects = [
+                _flat(item) for item in raw_subjects if isinstance(item, str) and _flat(item)
+            ]
+            existing_subjects = epub_meta.get("epub_subjects_translated")
+            aligned_existing = (
+                existing_subjects
+                if isinstance(existing_subjects, list) and len(existing_subjects) == len(subjects)
+                else None
             )
-        )
+            if subjects and (
+                aligned_existing is None
+                or any(not isinstance(item, str) or not item.strip() for item in aligned_existing)
+            ):
+                for idx, subject in enumerate(subjects):
+                    if (
+                        aligned_existing is not None
+                        and isinstance(aligned_existing[idx], str)
+                        and aligned_existing[idx].strip()
+                    ):
+                        continue
+                    plan.pending.append(
+                        TitleRequest(
+                            epub_meta,
+                            subject,
+                            field="epub_subjects_translated",
+                            list_index=idx,
+                            list_size=len(subjects),
+                        )
+                    )
+    return plan
 
 
 def title_batches(pending: list[TitleRequest]) -> list[list[TitleRequest]]:
@@ -276,10 +272,7 @@ def _store_navigation_terms(plan: TitlePlan, glossary: Storage | GlossaryStore) 
         existing = targets.get(source)
         if existing == target or (source, existing, target) in conflicts:
             continue
-        # Existing rows keep their type; only brand-new pairs are tagged as navigation.
-        result = glossary.upsert_term(
-            GlossaryTerm(source=source, target=target, type=TYPE_NAVIGATION)
-        )
+        result = glossary.upsert_term(GlossaryTerm(source=source, target=target))
         if result == "conflict":
             conflicts.add((source, existing, target))
         else:
@@ -320,10 +313,8 @@ class TitleTranslationService:
 
         batches = title_batches(plan.pending)
         completed = 0
-        # Only entity terms guide titles; stored navigation pairs would flood the prompt.
         glossary_text = prompts.render_glossary(
-            [term for term in glossary.all_terms() if term.type != TYPE_NAVIGATION],
-            source_lang=self._translator.src,
+            glossary.all_terms(), source_lang=self._translator.src
         )
         for batch_index, batch in enumerate(batches):
             titles = [item.source for item in batch]

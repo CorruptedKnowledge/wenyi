@@ -173,9 +173,6 @@ class BackendContext:
     # Web retains its executor; Desktop owns a dedicated thread per workflow.
     run_workflow_sync: WorkflowDispatcher = asyncio.to_thread
     metrics: Metrics = field(default_factory=Metrics)
-    # Optional host hooks for automatic resume after resumable provider outages.
-    schedule_auto_resume: Callable[[Any, int, int, str], None] | None = None
-    cancel_auto_resume: Callable[[str], None] | None = None
     # Auth policy: with api_token set, bearer checks stay on unless the host
     # explicitly opted out. Default True keeps deployments fail-closed.
     require_token: bool = True

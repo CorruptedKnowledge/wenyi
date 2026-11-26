@@ -172,13 +172,8 @@ def _export_book_title(
 
 
 def _seg_text(seg) -> str:
-    """Return the saved translation (including an intentional empty string), falling back to
-    source only when the segment is still untranslated (``target is None``).
-    Skipped boilerplate segments always export empty.
-    """
-    if seg.meta.get("skip"):
-        return ""
-    return seg.source if seg.target is None else seg.target
+    """Return a nonempty translation, falling back to source to prevent content loss."""
+    return seg.target if (seg.target and seg.target.strip()) else seg.source
 
 
 def _heading_level(chapter: Chapter, segment: Segment | None = None) -> int:
@@ -205,12 +200,10 @@ def _merged_paragraphs(chapter: Chapter) -> list[tuple[str, str, str, int]]:
     kinds: list[str] = []
     levels: list[int] = []
     attribute_continuation = False
-    skip_continuation = False
     for s in chapter.segments:
         if not s.cont:
             attribute_continuation = HTML_ATTRIBUTE_META_KEY in s.meta
-            skip_continuation = bool(s.meta.get("skip"))
-        if attribute_continuation or skip_continuation or s.meta.get("skip"):
+        if attribute_continuation:
             continue
         if not s.source.strip():
             continue
@@ -236,7 +229,7 @@ def _bilingual_source(source: str, target: str) -> str:
     from wenyi_core.markup.ruby import strip_ruby_markers
 
     # Source fallbacks still include pronunciation markers, so compare before stripping them.
-    if source == target or not target.strip():
+    if source == target:
         return ""
     source = strip_ruby_markers(source)
     return source if (source.strip() and source != target) else ""

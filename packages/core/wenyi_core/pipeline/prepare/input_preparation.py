@@ -13,7 +13,6 @@ from typing import Any
 from ...assemble.writer_common import validate_pdf_source_format
 from ...config import Config
 from ...events import ProgressFn
-from ...ingest.boilerplate import BUILTIN_RULES_VERSION, mark_boilerplate_segments
 from ...ingest.epub_reader import peek_epub_title
 from ...ingest.fb2_reader import peek_fb2_title
 from ...ingest.pdf_reader import cached_epub_source
@@ -26,7 +25,7 @@ from ...storage.run_store import resolve_file_run_dir, source_sha256
 
 def ingest_config(config: Config) -> dict[str, Any]:
     """Fingerprint the parsing inputs shared by preview and initialization."""
-    data: dict[str, Any] = {
+    return {
         "source_lang": config.source_lang,
         "target_lang": config.target_lang,
         "max_tokens_per_segment": config.segment.max_tokens_per_segment,
@@ -35,15 +34,6 @@ def ingest_config(config: Config) -> dict[str, Any]:
         "babeldoc_pages": config.pipeline.babeldoc_pages,
         "babeldoc_timeout": config.pipeline.babeldoc_timeout,
     }
-    if config.pipeline.skip_boilerplate:
-        data["skip_boilerplate"] = True
-        data["boilerplate_rules_version"] = BUILTIN_RULES_VERSION
-        data["boilerplate_patterns"] = list(config.pipeline.boilerplate_patterns)
-    return data
-
-
-# Matches "epub_schema" written by the native EPUB reader (rust/src/epub/ingest.rs).
-EPUB_INGEST_SCHEMA = 6
 
 
 def load_parsed_document(
@@ -103,15 +93,6 @@ def parse_document(
             if saved_mineru:
                 cached_epub_source(storage.source_dir, digest, meta[MINERU_EPUB_DIGEST])
     cached = load_parsed_document(storage, input_path, config, actual_sha256=digest)
-    # A cache from an older EPUB reader lacks fields the current reader captures (such as
-    # creators and navigation labels). Read-only views keep using it; a parse run refreshes it
-    # locally.
-    if (
-        cached is not None
-        and cached.fmt == "epub"
-        and cached.meta.get("epub_schema") != EPUB_INGEST_SCHEMA
-    ):
-        cached = None
     if cached is not None:
         document = cached
     else:
@@ -130,11 +111,6 @@ def parse_document(
             babeldoc_pages=pipeline.babeldoc_pages,
             babeldoc_timeout=pipeline.babeldoc_timeout,
             mineru_token_resolver=mineru_token_resolver,
-        )
-        mark_boilerplate_segments(
-            document,
-            enabled=pipeline.skip_boilerplate,
-            custom_patterns=pipeline.boilerplate_patterns,
         )
     if source_sha256(input_path) != digest:
         raise ValueError("Source changed during parsing; ensure the file is stable and retry.")

@@ -834,8 +834,7 @@ def test_glossary_explicit_edit_preserves_order_and_rolls_back(store):
     assert len(store.open_conflicts()) == 1
     assert store.update_term("first", GlossaryTerm("renamed", "edited", aliases=["alias"]))
     assert [term.source for term in store.all_terms()] == ["renamed", "second"]
-    # An explicit edit makes the entry the user's: no extraction provenance remains.
-    assert store.get_term("renamed").first_chapter is None
+    assert store.get_term("renamed").first_chapter == 3
     assert store.get_term("renamed").status == "ok"
     assert store.open_conflicts() == []
     assert not store.update_term("missing", GlossaryTerm("missing", "none"))

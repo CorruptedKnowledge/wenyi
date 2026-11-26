@@ -1,7 +1,6 @@
 """Translate aligned title batches without accessing book state."""
 
 from ..errors import WenyiError
-from ..llm.json_parser import UnsafeJsonRepairError
 from . import prompts
 from .base import Agent
 
@@ -32,17 +31,10 @@ class TitleTranslator(Agent):
             n=len(titles),
             numbered_titles=prompts.numbered(titles),
         )
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        try:
-            data, _raw = self._complete_json_turn(
-                messages, operation="translation.title", require_complete_payload=True
-            )
-        except UnsafeJsonRepairError:
-            # Repair can fold stray reasoning into a title while keeping the count; sample once
-            # more and let a second unsafe reply stop the title run like any unusable JSON.
-            data, _raw = self._complete_json_turn(
-                messages, operation="translation.title", require_complete_payload=True
-            )
+        data = self.client.complete_json(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            operation="translation.title",
+        )
         out = data.get("titles") if isinstance(data, dict) else data
         if not isinstance(out, list) or len(out) != len(titles):
             raise TitleOutputError(len(titles), len(out) if isinstance(out, list) else None)

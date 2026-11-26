@@ -11,15 +11,12 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from ...agents.analyzer import analysis_digest_budget
 from ...assemble.writer_common import validate_pdf_source_format
 from ...events import ProgressFn
 from ...i18n.languages import normalize_language
 from ...i18n.policy.models import Phase, content_hash
 from ...i18n.prompts import render
-from ...ingest.tokens import count_tokens
 from ...llm.errors import ProviderFailure, describe_provider_failure
-from ...llm.routing import inference_snapshot
 from ...models.document import Document
 from ...storage.protocol import Storage
 from ...storage.run_store import source_sha256
@@ -226,7 +223,6 @@ class PreparationService:
             source_lang=doc.source_lang,
             target_lang=doc.target_lang,
             chapters=len(doc.chapters),
-            skipped_boilerplate_count=int(doc.meta.get("skipped_boilerplate_count") or 0),
             config={
                 "review": self._runtime.config.pipeline.review,
                 "polish": self._runtime.config.pipeline.polish,
@@ -249,29 +245,19 @@ class PreparationService:
         if not sample:
             return {}
         policy = self._runtime.config.language_policy("analysis")
-        src = self._runtime.config.source_lang
-        tgt = self._runtime.config.target_lang
-        digest_budget = analysis_digest_budget(
-            self._runtime.config,
-            render("analyzer_system", plan=policy, src=src, tgt=tgt),
-            render("analyzer_user", plan=policy, src=src, tgt=tgt, sample=sample),
+        key = (
+            "preparation/analysis/"
+            + content_hash(
+                {
+                    "source": source_hash,
+                    "sample": sample,
+                    "digests": digests,
+                    "policy": policy.task_fingerprint("analyzer"),
+                    "routing": self._runtime.config.llm.model_dump(mode="json"),
+                }
+            )
+            + ".json"
         )
-        key_payload: dict[str, Any] = {
-            "source": source_hash,
-            "sample": sample,
-            "digests": digests,
-            "policy": policy.task_fingerprint("analyzer"),
-            "routing": inference_snapshot(self._runtime.config.llm, ("analysis.style",)),
-        }
-        # Only bind digest_budget when the raw digest block exceeds it, preserving existing
-        # cache keys for small books whose digests render byte-for-byte identically.
-        if (
-            digests
-            and count_tokens("\n".join(f"[{i}] {digest}" for i, digest in enumerate(digests)))
-            > digest_budget
-        ):
-            key_payload["digest_budget"] = digest_budget
-        key = "preparation/analysis/" + content_hash(key_payload) + ".json"
         saved = store.read_artifact(key)
         if isinstance(saved, dict):
             return saved

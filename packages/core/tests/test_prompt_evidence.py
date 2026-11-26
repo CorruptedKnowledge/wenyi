@@ -118,18 +118,15 @@ def test_each_agent_consumes_only_local_notes_when_enabled(enabled, agent):
             [{"issue_id": "issue", "detail": "Incomplete", "suggestion": "Restore meaning"}],
             relevant_glossary=_terms(),
         )
-    system = client.calls[0]["messages"][0]["content"]
     user = client.calls[0]["messages"][1]["content"]
     # Review checks the saved glossary snapshot independently of note generation.
     assert (_terms()[0].note in user) is (enabled or agent == "reviewer")
     assert _terms()[1].note not in user
     assert _terms()[2].note not in user
-    assert _terms()[0].note not in system
     glossary = render_glossary(_terms(), source_lang=config.source_lang)
-    glossary_container = system if agent in {"reviewer", "translator"} else user
     assert (
         json.dumps(glossary, ensure_ascii=False)[1:-1] if agent == "precision" else glossary
-    ) in glossary_container
+    ) in user
     if agent == "polisher":
         assert "[Current source paragraphs:" not in user
 
