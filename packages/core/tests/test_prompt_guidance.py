@@ -122,32 +122,36 @@ def test_english_dialogue_cues_stay_scoped_to_english_literary_targets(target):
 def test_translator_system_zh_en_structure_and_craft_contracts():
     prompt = render("translator_system", src="zh", tgt="en")
     # Intra-paragraph syntactic freedom alongside strict meaning/paragraph boundaries.
-    assert "Fidelity means meaning, not source word order" in prompt
-    assert "reorder clauses and split, join, or reshape sentences" in prompt
+    assert "Fidelity means meaning, subtext, and logic—not source word order" in prompt
+    assert "reorder clauses and split or join sentences" in prompt
     # Deliberate source shifts in viewpoint, register, tense, and pacing are preserved.
     assert "shifts viewpoint, register, tense, or pacing" in prompt
     assert "unless the source deliberately shifts tense" in prompt
     # Glossary governs how terms render, not mechanical name repetition.
-    assert "fixes how names and terms are rendered, not how often they appear" in prompt
-    # Continuity context and batch-boundary lookahead are distinct, with explicit triggers.
-    assert "Continuity context:" in prompt
-    assert "Batch boundary and lookahead:" in prompt
-    assert prompt.index("Continuity context:") < prompt.index("Batch boundary and lookahead:")
-    assert "unclosed quote, dangling clause, or deliberate cutoff" in prompt
-    assert "unfinished or continues into the following source paragraph" in prompt
-    assert "Do not assume continuity without source evidence" in prompt
+    assert "fixes how recurring names and terms render, not how often they appear" in prompt
+    # Continuity context, annotations, and batch-boundary lookahead stay clear and grounded.
+    assert "Context, annotations & batch boundary:" in prompt
+    assert "unclosed quote, dangling clause, or cutoff" in prompt
+    assert "continues into the following source paragraph" in prompt
+    assert "do not assume continuity without source evidence" in prompt
     assert "never translate, copy, borrow from, or emit an output item for it" in prompt
-    # Stock filler omission is explicitly conditional on adding no meaning.
+    # Chinese->English literary craft: syntax, hedges, brackets, dialogue colons, no silly scar tissue.
+    assert "的-chains" in prompt
     assert (
-        "only when they add no meaning, preserving genuine timing, degree, or involuntariness"
-        in prompt
+        "Absorb recurring Chinese hedges, intensifiers, and formulaic speech/thought tags" in prompt
     )
+    assert "preferring natural 'I' with matching register" in prompt
+    assert "single quotes ('...') for direct first-person inner monologue" in prompt
+    assert "Render 【...】 as [...]" in prompt
+    assert "without CJK brackets or Markdown asterisks" in prompt
+    assert "convert Chinese dialogue colons" in prompt
+    assert "the lone one" not in prompt
+    assert "the sir" not in prompt
     # Third-language parenthetical rule reconciled with no-gloss rule for ordinary source text.
     assert "a third language neither source nor target" in prompt
     assert "ordinary source terms or idioms must not receive parenthetical glosses" in prompt
-    # Punctuation preserves structure and pairing; brackets keep form.
-    assert "Preserve the structure and pairing of quotation marks, brackets" in prompt
-    assert "Keep the bracket form (【...】 / [...])" in prompt
+    # Punctuation harmonizes English conversion with structure preservation.
+    assert "convert foreign full-width punctuation and brackets to English equivalents" in prompt
     # JSON-escaped \n instruction lives in the output format rule, not as raw (\n) in pair text.
     assert "JSON-escaped \\n within the same string" in prompt
     assert "(\\n)" not in prompt
@@ -185,14 +189,19 @@ def test_sparse_editor_batch_prompt_uses_genre_labels_guidance_and_punct_rule(
     system = captured[0]["messages"][0]["content"]
     assert f"Simplified Chinese→English {expected_kind} translations" in system
     assert "web-novel" not in system
-    assert "Target-language guidance:" in system
-    assert "Use English punctuation and spacing" in system
+    assert "Language guidance:" in system
+    assert "Chinese→English guidance:" in system
+    assert "Use standard English punctuation and spacing" in system
     assert f"[{expected_heading}:" in system
     assert "register mismatch with the source" in system
     assert "elevate the register above the source" in system
     assert "preserve unfinished syntax or open dialogue" in system
     if genre == "academic":
         assert "fiction" not in system
+        assert "微微" not in system
+        assert "embedded verse" not in system
+    else:
+        assert "微微" in system
 
 
 @pytest.mark.parametrize(

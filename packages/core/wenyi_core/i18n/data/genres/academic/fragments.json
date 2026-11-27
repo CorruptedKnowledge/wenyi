@@ -33,5 +33,6 @@
   "genre_voice_focus": "the author's stance, attribution and degree of certainty",
   "genre_japanese_reference_guidance": "authorial self-reference",
   "genre_chinese_conventions": "academic prose",
-  "genre_chinese_style_focus": "conceptual distinctions, logical relations and the source's degree of certainty"
+  "genre_chinese_style_focus": "conceptual distinctions, logical relations and the source's degree of certainty",
+  "genre_zh_en_focus": "Render formal discourse markers and four-character abstractions with precise English analytical prose and explicit logical connectors, preserving technical distinctions."
 }

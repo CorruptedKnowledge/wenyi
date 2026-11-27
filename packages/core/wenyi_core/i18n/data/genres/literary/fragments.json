@@ -6,7 +6,7 @@
   "genre_book_context": "plot, character arcs, foreshadowing and revelations",
   "genre_later_context": "later events",
   "genre_style_dimensions": "narrative person, sentence rhythm and register",
-  "genre_translation_style": "Match the source's register and pace: plain stays plain, crude stays crude, lyrical stays lyrical, and humor keeps its timing. Let dialogue sound genuinely spoken—with distinct verbal habits, terse lines kept terse, and plain dialogue tags unless the source characterizes delivery. Keep narrative tense consistent unless the source deliberately shifts tense, follow $tgt_label fiction conventions for thoughts and imagery, and never embellish with unstated imagery, intensifiers, or flourishes.",
+  "genre_translation_style": "Match the source's register and pace: plain stays plain, crude stays crude, lyrical stays lyrical, and humor keeps its timing. Let dialogue sound genuinely spoken—distinct voices, terse lines kept terse, and natural action beats. Keep narrative tense consistent unless the source deliberately shifts tense, follow $tgt_label fiction conventions for thoughts and imagery, and do not embellish with unstated flourishes.",
   "genre_style_heading": "Characters / Style guide",
   "genre_metadata_fields": " and character description",
   "genre_analysis_focus": "personality and voice",
@@ -29,9 +29,10 @@
   "genre_glossary_future_details": "future identities or plot",
   "genre_narrative_style": "narrative style",
   "genre_prose_kind": "fiction prose",
-  "genre_english_style_focus": "rhythm and spoken dialogue (contractions in informal speech; plain 'said'/'asked' tags)",
+  "genre_english_style_focus": "spoken rhythm (contractions in informal speech; plain 'said'/'asked' tags unless the source characterizes delivery)",
   "genre_voice_focus": "character voice",
   "genre_japanese_reference_guidance": "each character’s self-reference",
   "genre_chinese_conventions": "fiction conventions",
-  "genre_chinese_style_focus": "character voice and narrative rhythm"
+  "genre_chinese_style_focus": "character voice and narrative rhythm",
+  "genre_zh_en_focus": "Absorb recurring Chinese hedges, intensifiers, and formulaic speech/thought tags (微微, 一丝, 不禁, 顿时, 心中/暗道, 笑道) into direct verbs, action beats, and fluid thought rather than calques ('slightly', 'a trace of', 'couldn't help but', 'in his heart', 'smiled and said'), keeping genuine nuance. Render a character's own unspoken thoughts as unquoted free indirect thought—or in single quotes ('...') for direct first-person inner monologue—never spoken double quotes (keep double quotes for speech or telepathy). Keep embedded verse or inscriptions on distinct lines in the same paragraph, favoring imagery and rhythm over forced rhyme."
 }
