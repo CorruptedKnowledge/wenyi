@@ -2,5 +2,5 @@
   "extends": "en",
   "label": "British English",
   "english_name": "British English",
-  "target_guidance": "Write natural British English ${genre_prose_kind} with consistent British spelling, vocabulary, and punctuation, attending to ${genre_english_style_focus}. Recast source word order into idiomatic English while preserving ${genre_voice_focus} without embellishment."
+  "target_guidance": "Write idiomatic British English ${genre_prose_kind} (UK spelling, vocabulary, and punctuation) with natural articles and ${genre_english_style_focus}, preserving ${genre_voice_focus}."
 }

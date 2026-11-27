@@ -151,8 +151,8 @@
     "wife",
     "friend"
   ],
-  "target_guidance": "Write idiomatic English ${genre_prose_kind} with natural tense, articles, and pronouns, attending to ${genre_english_style_focus}. Recast source word order naturally without embellishing or adding unstated details.",
-  "punctuation_rule": "Use English punctuation and spacing, placing ordinary stops, commas, and semicolons where English syntax calls for them. Preserve the structure and pairing of quotation marks, brackets, dashes, ellipses, special symbols, and open continuations; do not apply another writing system's full-width punctuation rules.",
+  "target_guidance": "Write idiomatic English ${genre_prose_kind} with natural articles and ${genre_english_style_focus}.",
+  "punctuation_rule": "Use standard English punctuation and spacing for English syntax; convert foreign full-width punctuation and brackets to English equivalents while preserving pairing, dashes, ellipses, special symbols, and open continuations.",
   "title_rule": "Use conventional English chapter titles and translate section labels by meaning, for example Chapter 3, Prologue and Epilogue.",
   "digest_length": "150 words",
   "synopsis_length": "350 words"

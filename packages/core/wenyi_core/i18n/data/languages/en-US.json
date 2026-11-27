@@ -2,5 +2,5 @@
   "extends": "en",
   "label": "American English",
   "english_name": "American English",
-  "target_guidance": "Write natural American English ${genre_prose_kind} with consistent American spelling, vocabulary, and punctuation, attending to ${genre_english_style_focus}. Recast source word order into idiomatic English while preserving ${genre_voice_focus} without embellishment."
+  "target_guidance": "Write idiomatic American English ${genre_prose_kind} (US spelling, vocabulary, and punctuation) with natural articles and ${genre_english_style_focus}, preserving ${genre_voice_focus}."
 }

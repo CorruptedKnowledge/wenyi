@@ -42,8 +42,9 @@ _EDIT_RULES = (
     "speaker/agent\n"
     "- Wrong pronoun/gender, glossary or form-of-address inconsistency, or untranslated "
     "ordinary source residue (preserve intentionally retained third-language phrases)\n"
-    "- Literalized idioms, stiff source word order or calques, awkward/unnatural dialogue, "
-    "register mismatch with the source, or broken embedded verse line breaks\n"
+    "- Literalized idioms, repetitive source filler calques, clearly calqued syntax or broken "
+    "dialogue, register mismatch with the source, stray foreign full-width punctuation or "
+    "brackets or raw Markdown asterisks left in target prose, or broken in-paragraph line breaks\n"
     "Fix only the defective phrasing while keeping the source's meaning, tone, and restraint; "
     "leave accurate, natural paragraphs untouched and never rewrite for cosmetic synonym swaps "
     "or elevate the register above the source.\n"
@@ -54,8 +55,7 @@ _EDIT_RULES = (
     "non-empty paragraph.\n"
     "Encode any intentional in-paragraph line break inside text as JSON-escaped \\n, never "
     "raw unescaped newlines or literal double-escaped \\\\n.\n"
-    "Never enumerate or comment on clean paragraphs in internal reasoning; if no paragraph "
-    'has a clear defect, immediately return {"patches":[]}.\n'
+    'If no paragraph has a clear defect, immediately return {"patches":[]}.\n'
     'Return strict JSON: {"patches":[{"index":<int>,"text":"<replacement>","reason":"<short>"}]}'
 )
 
@@ -138,6 +138,8 @@ class SparseSemanticEditor(Agent):
         next_ref = prompts.render_source_reference(next_source)
         continue_user = (
             f"You just translated {n} paragraphs (indexed 0 through {n - 1}) above.\n"
+            "Override the earlier translations output schema for this turn and return only "
+            "the patches JSON below.\n"
             f"{_EDIT_RULES}\n"
             f"[Following source paragraph] (reference only; do not translate)\n{next_ref}"
         ) + prompts.protected_object_guidance(list(drafts))
@@ -183,14 +185,16 @@ class SparseSemanticEditor(Agent):
         tgt_label = prompt_vals.get("tgt_label") or self.tgt
         genre = self.language_policy.context.genre
         source_kind = genres.compose("${genre_source_text}", genre=genre)
-        target_guidance = prompt_vals.get("target_guidance", "").strip()
+        lang_guidance = (
+            prompt_vals.get("configured_lang_guidance", "") or prompt_vals.get("lang_guidance", "")
+        ).strip()
         punct_rule = prompt_vals.get("punct_rule", "").strip()
         base_parts = [
             f"You are a precise bilingual editor auditing {src_label}→{tgt_label} {source_kind} "
             f"translations.\n{_EDIT_RULES}"
         ]
-        if target_guidance:
-            base_parts.append(f"Target-language guidance:\n{target_guidance}")
+        if lang_guidance:
+            base_parts.append(f"Language guidance:\n{lang_guidance}")
         if punct_rule:
             base_parts.append(punct_rule)
         base_system = "\n\n".join(base_parts)
