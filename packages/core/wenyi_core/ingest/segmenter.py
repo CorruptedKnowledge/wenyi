@@ -1,15 +1,17 @@
 """Dispatch document readers and split translation batches.
 load_document selects a reader by extension and optionally splits long segments.
-batch_segments groups chapter segments by a shared token budget and requires equally
-sized model output for alignment. split_long_segments splits oversized segments at
-sentences, marks continuations and lets the writer merge them into the original
-paragraph/EPUB element.
+batch_segments partitions chapter segments into balanced, token-bounded batches and
+requires equally sized model output for alignment. split_long_segments splits oversized
+segments at sentences, marks continuations and lets the writer merge them into the
+original paragraph/EPUB element.
 """
 
 from __future__ import annotations
 
 import os
 import re
+from bisect import bisect_left, bisect_right
+from collections import deque
 from collections.abc import Callable
 from copy import deepcopy
 
@@ -199,18 +201,156 @@ def load_document(
     return doc
 
 
-def batch_segments(segments: list[Segment], max_tokens: int) -> list[list[Segment]]:
-    """Group segments into batches by shared token budget (tiktoken cl100k_base)."""
+def _greedy_batch_count(weights: list[int], max_tokens: int) -> int:
+    """Return the minimum number of contiguous batches needed under ``max_tokens``."""
+    batches = 1
+    cur = 0
+    for weight in weights:
+        if cur + weight > max_tokens:
+            batches += 1
+            cur = weight
+        else:
+            cur += weight
+    return batches
+
+
+def _min_bounded_batches(prefix: list[int], m: int, floor: int, cap: int) -> list[int]:
+    """Return ``min_b`` where ``min_b[i]`` is the minimum number of non-empty
+    contiguous batches for ``run[i:m]`` whose weights all lie in ``[floor, cap]``
+    (or ``m + 1`` when impossible). Runs in O(m) time and space via a monotone deque.
+    """
+    inf = m + 1
+    min_b = [inf] * (m + 1)
+    min_b[m] = 0
+    dq: deque[int] = deque()
+    add_j = m
+    hi_j = m
+    for i in range(m - 1, -1, -1):
+        base = prefix[i]
+        min_pref = base + floor
+        max_pref = base + cap
+        while hi_j > i and prefix[hi_j] > max_pref:
+            hi_j -= 1
+        while dq and dq[0] > hi_j:
+            dq.popleft()
+        while add_j >= i + 1 and prefix[add_j] >= min_pref:
+            if add_j <= hi_j and min_b[add_j] < inf:
+                val = min_b[add_j]
+                while dq and min_b[dq[-1]] >= val:
+                    dq.pop()
+                dq.append(add_j)
+            add_j -= 1
+        if dq:
+            min_b[i] = 1 + min_b[dq[0]]
+    return min_b
+
+
+def _partition_balanced_run(
+    run: list[Segment], weights: list[int], max_tokens: int
+) -> list[list[Segment]]:
+    """Split a run where every segment fits ``max_tokens`` into balanced batches."""
+    m = len(run)
+    prefix = [0]
+    for weight in weights:
+        prefix.append(prefix[-1] + weight)
+    total = prefix[m]
+    if total <= max_tokens:
+        return [run]
+
+    k = _greedy_batch_count(weights, max_tokens)
+    if k == 1:
+        return [run]
+    if k == m:
+        return [[segment] for segment in run]
+
+    lo = max(max(weights), (total + k - 1) // k)
+    hi = max_tokens
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if _greedy_batch_count(weights, mid) <= k:
+            hi = mid
+        else:
+            lo = mid + 1
+    cap = lo
+
+    # Maximize the smallest batch weight under fixed (k, cap) in O(m log cap) time and
+    # O(m) space. Because k is minimal under cap, no [floor, cap] partition has < k
+    # batches, so min_b[0] <= k iff a valid k-batch partition exists (and every valid
+    # step satisfies min_b[end] == remaining - 1).
+    best_floor = 0
+    best_min_b = _min_bounded_batches(prefix, m, 0, cap)
+    fl_lo, fl_hi = 1, total // k
+    while fl_lo <= fl_hi:
+        mid = (fl_lo + fl_hi) // 2
+        cand = _min_bounded_batches(prefix, m, mid, cap)
+        if cand[0] <= k:
+            best_floor = mid
+            best_min_b = cand
+            fl_lo = mid + 1
+        else:
+            fl_hi = mid - 1
+
     batches: list[list[Segment]] = []
-    cur: list[Segment] = []
-    cur_tokens = 0
-    for s in segments:
-        slen = count_tokens(s.source)
-        if cur and cur_tokens + slen > max_tokens:
+    start = 0
+    for remaining in range(k, 0, -1):
+        if remaining == 1:
+            batches.append(run[start:m])
+            break
+        rem_tokens = total - prefix[start]
+        rem_count = m - start
+        cut_lo = max(start + 1, bisect_left(prefix, prefix[start] + best_floor, start + 1, m + 1))
+        cap_hi = bisect_right(prefix, prefix[start] + cap, start + 1, m + 1) - 1
+        cut_hi = min(cap_hi, m - (remaining - 1))
+        need_rem = remaining - 1
+        best_end = min(
+            (end for end in range(cut_lo, cut_hi + 1) if best_min_b[end] == need_rem),
+            key=lambda end: (
+                abs((prefix[end] - prefix[start]) * remaining - rem_tokens),
+                abs((end - start) * remaining - rem_count),
+                end,
+            ),
+        )
+        batches.append(run[start:best_end])
+        start = best_end
+    return batches
+
+
+def batch_segments(segments: list[Segment], max_tokens: int) -> list[list[Segment]]:
+    """Group segments into balanced batches within a shared token budget (cl100k_base).
+
+    Preserves source order and the minimum batch count needed under ``max_tokens``.
+    Any single segment larger than ``max_tokens`` stays in its own batch; intervening
+    runs are partitioned into roughly equal-weight batches to avoid tiny orphan tails.
+    """
+    if not segments:
+        return []
+    weights = [count_tokens(s.source) for s in segments]
+    if max_tokens <= 0:
+        batches: list[list[Segment]] = []
+        cur: list[Segment] = []
+        cur_tokens = 0
+        for segment, weight in zip(segments, weights):
+            if cur and cur_tokens + weight > max_tokens:
+                batches.append(cur)
+                cur, cur_tokens = [], 0
+            cur.append(segment)
+            cur_tokens += weight
+        if cur:
             batches.append(cur)
-            cur, cur_tokens = [], 0
-        cur.append(s)
-        cur_tokens += slen
-    if cur:
-        batches.append(cur)
+        return batches
+
+    batches = []
+    run: list[Segment] = []
+    run_weights: list[int] = []
+    for segment, weight in zip(segments, weights):
+        if weight > max_tokens:
+            if run:
+                batches.extend(_partition_balanced_run(run, run_weights, max_tokens))
+                run, run_weights = [], []
+            batches.append([segment])
+        else:
+            run.append(segment)
+            run_weights.append(weight)
+    if run:
+        batches.extend(_partition_balanced_run(run, run_weights, max_tokens))
     return batches

@@ -34,11 +34,180 @@ def test_resume_and_review_pack_by_tokens_and_preserve_completed_blank():
         Segment(index=11, source="foo bar"),
         Segment(index=12, source="x"),
     ]
-    assert [[s.index for s in b] for b in resume_batches(segments, 4)] == [[10], [11], [12]]
+    # Balanced batching splits [2, 2, 1] at budget 4 into [10] and [11, 12];
+    # Review keeps greedy front-packing [10, 11] and [12].
+    assert [[s.index for s in b] for b in resume_batches(segments, 4)] == [[10], [11, 12]]
+    assert [[s.index for s in b] for b in resume_batches(segments, 5)] == [[10], [11, 12]]
     assert [[s.index for s in b] for b in ReviewChunkService.pack_contiguous(segments, 4)] == [
         [10, 11],
         [12],
     ]
+
+
+def test_serial_resume_skips_glossary_extract_when_legacy_checkpoints_cover_rebalanced_batch(
+    tmp_path,
+):
+    """Legacy greedy checkpoints (0:2) cover rebalanced completed sub-batches (0:1, 1:1)."""
+    from wenyi_core.storage.run_store import STATUS_PENDING
+
+    config = _config(str(tmp_path / "state"))
+    config.segment.max_tokens_per_batch = 4
+    config.pipeline.polish = False
+    config.pipeline.review = False
+    config.pipeline.annotation_alignment = False
+    store = FileStorage(str(tmp_path / "state" / "demo" / "targets" / "zh"))
+    store.save_manifest(
+        {
+            "title": "demo",
+            "source_file": "demo.txt",
+            "source_sha256": "a" * 64,
+            "fmt": "text",
+            "source_lang": "en",
+            "target_lang": "zh",
+            "chapters": [{"index": 0, "title": "Ch1", "status": STATUS_PENDING}],
+        }
+    )
+    # Segment 0 is a saved blank (""), segment 1 is saved ("T1"), segment 2 is pending.
+    # Balanced batching splits [2, 2, 1] @ 4 into [[0], [1, 2]], and resume_batches splits
+    # the second raw batch on completion state into [[0], [1], [2]].
+    chapter = Chapter(
+        index=0,
+        title="Ch1",
+        segments=[
+            Segment(index=0, source="hello world", target=""),
+            Segment(index=1, source="foo bar", target="T1"),
+            Segment(index=2, source="x", target=None),
+        ],
+    )
+    store.save_chapter(chapter)
+    # Legacy greedy run checkpointed segments [0, 1] as a single batch "0:2".
+    store.log_event("batch_glossary_extracted", chapter=0, start_index=0, count=2)
+
+    def handler(messages, tier, json_mode):
+        if "literary translator" in messages[0]["content"]:
+            return json.dumps({"translations": ["T2"]})
+        if "terminology" in messages[0]["content"] and "extractor" in messages[0]["content"]:
+            return json.dumps({"terms": []})
+        return routing_handler(messages, tier, json_mode)
+
+    client = FakeClient(handler=handler)
+    Orchestrator(config, client)._translation.run(store, book_synopsis="")
+
+    saved = store.load_chapter(0)
+    assert [s.target for s in saved.text_segments] == ["", "T1", "T2"]
+    trans_calls = [c for c in client.calls if c["operation"] == "translation.body"]
+    extract_calls = [c for c in client.calls if c["operation"] == "glossary.extract"]
+    assert len(trans_calls) == 1
+    # Completed sub-batches [0] and [1] are covered by legacy checkpoint "0:2", so only
+    # newly translated batch [2] plus the normal end-of-chapter pass run extraction.
+    assert len(extract_calls) == 2
+    assert "T2" in extract_calls[0]["messages"][-1]["content"]
+    assert "T1" not in extract_calls[0]["messages"][-1]["content"]
+
+    with open(store.event_log_path, encoding="utf-8") as handle:
+        events = [json.loads(line) for line in handle if line.strip()]
+    skipped = [e for e in events if e.get("event") == "batch_skipped"]
+    assert [
+        (e["start_index"], e["count"], e["glossary_extraction"]["skipped"]) for e in skipped
+    ] == [
+        (0, 1, 1),
+        (1, 1, 1),
+    ]
+
+
+def test_serial_resume_extracts_only_uncovered_span_on_partial_checkpoint_overlap(tmp_path):
+    """When all targets exist and legacy checkpoint 0:2 partially overlaps rebalanced [1, 2],
+    only uncovered span (2, 1) runs extraction and writes checkpoint 2:1.
+    """
+    from wenyi_core.storage.run_store import STATUS_PENDING
+
+    config = _config(str(tmp_path / "state"))
+    config.segment.max_tokens_per_batch = 4
+    config.pipeline.polish = False
+    config.pipeline.review = False
+    config.pipeline.annotation_alignment = False
+    store = FileStorage(str(tmp_path / "state" / "demo" / "targets" / "zh"))
+    store.save_manifest(
+        {
+            "title": "demo",
+            "source_file": "demo.txt",
+            "source_sha256": "b" * 64,
+            "fmt": "text",
+            "source_lang": "en",
+            "target_lang": "zh",
+            "chapters": [{"index": 0, "title": "Ch1", "status": STATUS_PENDING}],
+        }
+    )
+    chapter = Chapter(
+        index=0,
+        title="Ch1",
+        segments=[
+            Segment(index=0, source="hello world", target="T0"),
+            Segment(index=1, source="foo bar", target="T1"),
+            Segment(index=2, source="x", target="T2"),
+        ],
+    )
+    store.save_chapter(chapter)
+    store.log_event("batch_glossary_extracted", chapter=0, start_index=0, count=2)
+
+    def handler(messages, tier, json_mode):
+        if "terminology" in messages[0]["content"] and "extractor" in messages[0]["content"]:
+            return json.dumps({"terms": []})
+        return routing_handler(messages, tier, json_mode)
+
+    client = FakeClient(handler=handler)
+    Orchestrator(config, client)._translation.run(store, book_synopsis="")
+
+    assert not [c for c in client.calls if c["operation"] == "translation.body"]
+    extract_calls = [c for c in client.calls if c["operation"] == "glossary.extract"]
+    # First call is uncovered span (2, 1) only; second is normal end-of-chapter extraction.
+    assert len(extract_calls) == 2
+    assert "T2" in extract_calls[0]["messages"][-1]["content"]
+    assert "T1" not in extract_calls[0]["messages"][-1]["content"]
+    with open(store.event_log_path, encoding="utf-8") as handle:
+        events = [json.loads(line) for line in handle if line.strip()]
+    extracted_keys = [
+        (e["start_index"], e["count"])
+        for e in events
+        if e.get("event") == "batch_glossary_extracted"
+    ]
+    assert extracted_keys == [(0, 2), (2, 1)]
+
+
+def test_review_chunk_budget_caps_default_multiplier_and_preserves_overrides(tmp_path):
+    """Review chunk budget caps 3x multiplier at 9600 while preserving small/large overrides."""
+    from wenyi_core.agents.reviewer import Reviewer
+    from wenyi_core.pipeline.review.review_workflow import ReviewService
+    from wenyi_core.pipeline.run.runtime import PipelineRuntime
+
+    cases = ((1, 3), (1800, 5400), (4800, 9600), (100_000, 100_000))
+    captured_budgets: list[int] = []
+
+    def spy_pack(segments, max_tokens):
+        captured_budgets.append(max_tokens)
+        return [segments]
+
+    snapshots: list[dict] = []
+    for configured, _ in cases:
+        cfg = _config(str(tmp_path / f"state-{configured}"))
+        cfg.segment.max_tokens_per_batch = configured
+        client = FakeClient(handler=routing_handler)
+        snapshots.append(ReviewService(PipelineRuntime(cfg, client))._review_config_snapshot())
+        service = ReviewChunkService(cfg, client, Reviewer(client, cfg))
+        chapter = Chapter(
+            index=0,
+            title="Ch1",
+            segments=[Segment(index=0, source="alpha", target="甲")],
+        )
+        with patch.object(service, "pack_contiguous", side_effect=spy_pack):
+            service.review_chapters([chapter], terms=[])
+
+    expected_budgets = [expected for _, expected in cases]
+    assert captured_budgets == expected_budgets
+    assert [snap["review_chunk_budget"] for snap in snapshots] == expected_budgets
+    # Different effective chunk budgets produce distinct reuse fingerprints so stale
+    # chunk artifacts from an older layout cannot mix into a resumed report.
+    assert snapshots[1] != snapshots[2]
 
 
 @pytest.mark.parametrize("genre", ["literary", "academic"])

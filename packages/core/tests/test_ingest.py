@@ -44,8 +44,19 @@ from tests.sample_data import (
 
 class TestTokenBudget(unittest.TestCase):
     def test_batch_segments_uses_token_counts_not_characters(self):
-        # Under cl100k_base these are 2 + 2 + 1 tokens. A 4-token budget packs the
-        # first pair together; a 4-character budget would have split after "hell".
+        # Under cl100k_base these are 2 + 2 tokens (18 chars total). A 4-token budget
+        # keeps them in one batch; a 4-character budget would have split them.
+        segments = [
+            Segment(index=0, source="hello world", kind=KIND_TEXT),
+            Segment(index=1, source="foo bar", kind=KIND_TEXT),
+        ]
+        self.assertEqual([count_tokens(s.source) for s in segments], [2, 2])
+        batches = batch_segments(segments, max_tokens=4)
+        self.assertEqual([[s.index for s in batch] for batch in batches], [[0, 1]])
+
+    def test_batch_segments_balances_split_chapters_without_orphan_tail(self):
+        # Token counts [2, 2, 1] at budget 4 need 2 batches: balanced split is 2 / 3
+        # instead of greedy 4 / 1.
         segments = [
             Segment(index=0, source="hello world", kind=KIND_TEXT),
             Segment(index=1, source="foo bar", kind=KIND_TEXT),
@@ -53,7 +64,154 @@ class TestTokenBudget(unittest.TestCase):
         ]
         self.assertEqual([count_tokens(s.source) for s in segments], [2, 2, 1])
         batches = batch_segments(segments, max_tokens=4)
-        self.assertEqual([[s.index for s in batch] for batch in batches], [[0, 1], [2]])
+        self.assertEqual([[s.index for s in batch] for batch in batches], [[0], [1, 2]])
+
+    def test_batch_segments_avoids_orphan_tail_when_heavy_segment_pins_cap(self):
+        # Weights [8, 3, 3, 2, 1] at budget 8 have min batches k=3 and minimax cap 8.
+        # Greedy packing under cap 8 yields [8], [3, 3, 2], [1] (8/8/1); maximizing the
+        # smallest batch under fixed (k, cap) yields [8], [3, 3], [2, 1] (8/6/3).
+        from unittest.mock import patch
+
+        weights = [8, 3, 3, 2, 1]
+        segments = [Segment(index=i, source=f"s{i}", kind=KIND_TEXT) for i in range(len(weights))]
+        weight_map = {s.source: w for s, w in zip(segments, weights)}
+        with patch(
+            "wenyi_core.ingest.segmenter.count_tokens", side_effect=lambda text: weight_map[text]
+        ):
+            batches = batch_segments(segments, max_tokens=8)
+        self.assertEqual([[s.index for s in batch] for batch in batches], [[0], [1, 2], [3, 4]])
+
+        # Weights [400, 600, 100, 800, 200] at budget 1000 also have k=3, cap=1000;
+        # greedy mean-seeking yields [1000, 900, 200], while maximizing the minimum
+        # batch weight produces [400, 700, 1000] (no 1-segment 200-token orphan tail).
+        # Prepending 250 full-budget segments verifies O(m) exactness at large k * m.
+        w2 = [1000] * 250 + [400, 600, 100, 800, 200]
+        s2 = [Segment(index=i, source=f"b{i}", kind=KIND_TEXT) for i in range(len(w2))]
+        m2 = {s.source: w for s, w in zip(s2, w2)}
+        with patch("wenyi_core.ingest.segmenter.count_tokens", side_effect=lambda text: m2[text]):
+            b2 = batch_segments(s2, max_tokens=1000)
+        self.assertEqual([sum(m2[s.source] for s in batch) for batch in b2[-3:]], [400, 700, 1000])
+        self.assertEqual(
+            [[s.index for s in batch] for batch in b2[-3:]], [[250], [251, 252], [253, 254]]
+        )
+
+    def test_batch_segments_isolates_oversized_and_handles_zero_weight_and_empty(self):
+        from unittest.mock import patch
+
+        self.assertEqual(batch_segments([], max_tokens=10), [])
+
+        weights = [0, 3, 3, 1, 15, 0, 3, 3, 1]
+        segments = [Segment(index=i, source=f"s{i}", kind=KIND_TEXT) for i in range(len(weights))]
+        weight_map = {s.source: w for s, w in zip(segments, weights)}
+        with patch(
+            "wenyi_core.ingest.segmenter.count_tokens", side_effect=lambda text: weight_map[text]
+        ):
+            batches = batch_segments(segments, max_tokens=6)
+        self.assertEqual(
+            [[s.index for s in batch] for batch in batches],
+            [[0, 1], [2, 3], [4], [5, 6], [7, 8]],
+        )
+
+        # Plateau of zero-weight segments splits evenly by segment count.
+        plateau_weights = [3, 0, 0, 0, 3]
+        plateau_segs = [
+            Segment(index=i, source=f"p{i}", kind=KIND_TEXT) for i in range(len(plateau_weights))
+        ]
+        plateau_map = {s.source: w for s, w in zip(plateau_segs, plateau_weights)}
+        with patch(
+            "wenyi_core.ingest.segmenter.count_tokens",
+            side_effect=lambda text: plateau_map[text],
+        ):
+            plateau_batches = batch_segments(plateau_segs, max_tokens=4)
+        self.assertEqual(
+            [[s.index for s in batch] for batch in plateau_batches], [[0, 1], [2, 3, 4]]
+        )
+
+        # Non-positive budget falls back defensively to singleton batches.
+        self.assertEqual(
+            [[s.index for s in batch] for batch in batch_segments(plateau_segs[:2], max_tokens=0)],
+            [[0], [1]],
+        )
+
+    def test_batch_segments_matches_bruteforce_minimax_on_small_random_inputs(self):
+        import random
+        from unittest.mock import patch
+
+        def exhaustive_optimal_run(run_w: list[int], budget: int) -> tuple[int, int, int]:
+            """Exact (min k, min max-weight, -max min-weight) by enumerating all 2^(n-1) cuts."""
+            n_run = len(run_w)
+            best = (10**9, 10**9, 10**9)
+            for mask in range(1 << (n_run - 1)):
+                sums: list[int] = []
+                cur = run_w[0]
+                ok = True
+                for idx in range(1, n_run):
+                    if mask & (1 << (idx - 1)):
+                        if cur > budget:
+                            ok = False
+                            break
+                        sums.append(cur)
+                        cur = run_w[idx]
+                    else:
+                        cur += run_w[idx]
+                        if cur > budget:
+                            ok = False
+                            break
+                if ok and cur <= budget:
+                    sums.append(cur)
+                    cand = (len(sums), max(sums), -min(sums))
+                    if cand < best:
+                        best = cand
+            return best
+
+        rng = random.Random(20261127)
+        cases = [([9, 6, 2, 3, 5, 4], 9)]
+        for _ in range(120):
+            n = rng.randint(1, 10)
+            budget = rng.randint(1, 12)
+            cases.append(([rng.randint(0, budget + 3) for _ in range(n)], budget))
+
+        for weights, budget in cases:
+            n = len(weights)
+            segments = [Segment(index=i, source=f"s{i}", kind=KIND_TEXT) for i in range(n)]
+            weight_map = {s.source: w for s, w in zip(segments, weights)}
+            with patch(
+                "wenyi_core.ingest.segmenter.count_tokens",
+                side_effect=lambda text: weight_map[text],
+            ):
+                batches = batch_segments(segments, max_tokens=budget)
+
+            # Concatenation preserves exact segment identity and order; no empty batch.
+            self.assertTrue(all(batches))
+            self.assertEqual([s for b in batches for s in b], segments)
+            for batch in batches:
+                batch_w = sum(weight_map[s.source] for s in batch)
+                if len(batch) > 1:
+                    self.assertLessEqual(batch_w, budget)
+
+            # Verify exact optimality independently on each contiguous normal run.
+            cursor = 0
+            i = 0
+            while i < n:
+                if weights[i] > budget:
+                    self.assertEqual(batches[cursor], [segments[i]])
+                    cursor += 1
+                    i += 1
+                    continue
+                j = i
+                while j < n and weights[j] <= budget:
+                    j += 1
+                opt_k, opt_max, opt_neg_min = exhaustive_optimal_run(weights[i:j], budget)
+                run_batches = batches[cursor : cursor + opt_k]
+                self.assertEqual([s for b in run_batches for s in b], segments[i:j])
+                run_sums = [sum(weight_map[s.source] for s in b) for b in run_batches]
+                self.assertEqual(max(run_sums), opt_max, f"weights={weights[i:j]}, budget={budget}")
+                self.assertEqual(
+                    min(run_sums), -opt_neg_min, f"weights={weights[i:j]}, budget={budget}"
+                )
+                cursor += opt_k
+                i = j
+            self.assertEqual(cursor, len(batches))
 
 
 class TestTextIngest(unittest.TestCase):

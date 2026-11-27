@@ -50,6 +50,7 @@ from .translation_batch import (
     keep_nonempty_drafts,
     mark_polish_failure,
     resume_batches,
+    uncovered_glossary_spans,
 )
 
 if TYPE_CHECKING:
@@ -351,17 +352,12 @@ class TranslationService:
                     s.meta.get(POLISH_PENDING) or s.meta.get(POLISH_FAILED) for s in b
                 )
                 self._align_batch_context(store, chapter, text_segs, batch_start, len(b))
-                skip_extract = (
-                    reopened_done
-                    or glossary_key in glossary_checkpoints
-                    or (
-                        context_policy is not None
-                        and self._glossary_checkpoint_covers(
-                            glossary_checkpoints, batch_start, len(b)
-                        )
-                    )
+                uncovered = (
+                    []
+                    if reopened_done or glossary_key in glossary_checkpoints
+                    else uncovered_glossary_spans(glossary_checkpoints, batch_start, len(b))
                 )
-                if skip_extract:
+                if not uncovered:
                     if self._extraction_queue is not None and self._extraction_queue.settle():
                         term_snapshot_stale = True
                     summary = {
@@ -372,17 +368,22 @@ class TranslationService:
                         "skipped": 1,
                     }
                 else:
-                    summary = self.extract_batch_glossary(
-                        glossary,
-                        store,
-                        ci,
-                        batch_start,
-                        b,
-                        translation_history,
-                        source_corpus,
-                        admission=notes,
-                    )
-                    glossary_checkpoints.add(glossary_key)
+                    summary = {"inserted": 0, "conflict": 0, "unchanged": 0, "updated": 0}
+                    for span_start, span_count in uncovered:
+                        offset = span_start - batch_start
+                        part = self.extract_batch_glossary(
+                            glossary,
+                            store,
+                            ci,
+                            span_start,
+                            b[offset : offset + span_count],
+                            translation_history,
+                            source_corpus,
+                            admission=notes,
+                        )
+                        for key, val in part.items():
+                            summary[key] = summary.get(key, 0) + val
+                        glossary_checkpoints.add(store.batch_glossary_key(span_start, span_count))
                     term_snapshot_stale = True
                 if notes is not None:
                     covered_notes.update(notes.maintain(ci, batch_start, b))

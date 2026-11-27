@@ -102,8 +102,9 @@ For each body batch:
 4. Extract terms from the completed pairs and checkpoint that extraction.
 5. Refresh the glossary snapshot before the next pending batch if it changed.
 
-A completed target batch with no glossary checkpoint requires extraction, not
-retranslation. A fully checkpointed batch skips both. Chapter completion follows
+A completed target batch with uncovered segments requires extraction only for those
+uncovered spans, not retranslation. A batch covered by completed extraction checkpoints
+(including older, differently-bounded batches) skips both. Chapter completion follows
 its required batch and chapter-level work. Keep interruption tests at the boundaries
 between target persistence, alignment and glossary checkpointing.
 

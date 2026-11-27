@@ -471,7 +471,7 @@ CLI 的 `translate` 和 `assemble` 可用 `--mono/--no-mono`、
 
 | 设置 | 默认值 | 含义／范围 |
 |---|---|---|
-| `segment.max_tokens_per_batch` | `1800` | 每个翻译批次的原文 token 预算；整数 ≥ 1。 |
+| `segment.max_tokens_per_batch` | `4800` | 每个翻译批次的原文 token 预算；整数 ≥ 1。 |
 | `segment.max_tokens_per_segment` | `1200` | 超长原文段落切分阈值；整数 ≥ 0，`0` 关闭切分。 |
 
 两者使用 tiktoken `cl100k_base` 通用估算，不是线上提供商的实际分词器。

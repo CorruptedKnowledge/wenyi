@@ -40,7 +40,7 @@ llm:
 # ── Segmentation ─────────────────────────────────────────────────────────────────
 segment:
   # Target batch size in tokens (tiktoken cl100k_base).
-  max_tokens_per_batch: 1800
+  max_tokens_per_batch: 4800
   # Split longer paragraphs at sentence boundaries by the same token budget; merge on export.
   max_tokens_per_segment: 1200
 
@@ -114,7 +114,7 @@ class SegmentConfig(BaseModel):
     # gt=0 on the batch budget: a persisted 0 would degrade packing to one request per
     # segment with no error anywhere (audit Y-3/F-2). max_tokens_per_segment keeps 0 as
     # a valid knob — the splitter then splits every sentence into its own segment.
-    max_tokens_per_batch: int = Field(default=1800, gt=0)
+    max_tokens_per_batch: int = Field(default=4800, gt=0)
     max_tokens_per_segment: int = Field(default=1200, ge=0)
 
 
