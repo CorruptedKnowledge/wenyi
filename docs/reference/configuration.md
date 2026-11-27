@@ -501,7 +501,7 @@ Format selection and output paths are command options, not `output.format` or
 
 | Setting | Default | Meaning / range |
 |---|---|---|
-| `segment.max_tokens_per_batch` | `1800` | Source-token budget per translation batch; integer ≥ 1. |
+| `segment.max_tokens_per_batch` | `4800` | Source-token budget per translation batch; integer ≥ 1. |
 | `segment.max_tokens_per_segment` | `1200` | Threshold for splitting long source paragraphs; integer ≥ 0, with `0` disabling splitting. |
 
 Both use tiktoken `cl100k_base`, a common estimator rather than the live

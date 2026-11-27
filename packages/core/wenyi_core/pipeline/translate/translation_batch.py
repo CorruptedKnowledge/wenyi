@@ -331,17 +331,35 @@ def resume_batches(segments: list[Segment], max_tokens: int) -> list[list[Segmen
     return batches
 
 
-def glossary_checkpoint_covers(checkpoints: set[str], start: int, count: int) -> bool:
-    """Reuse completed extraction when BabelDOC role boundaries split an older batch."""
+def uncovered_glossary_spans(
+    checkpoints: set[str], start: int, count: int
+) -> list[tuple[int, int]]:
+    """Return contiguous ``(start, count)`` spans in ``[start, start + count)``
+    not yet covered by saved glossary extraction checkpoints.
+    """
+    if count <= 0:
+        return []
+    end = start + count
     ranges = sorted(
         (int(m.group(1)), int(m.group(1)) + int(m.group(2)))
         for key in checkpoints
         if (m := re.fullmatch(r"(\d+):([1-9]\d*)", key)) is not None
     )
+    uncovered: list[tuple[int, int]] = []
     cursor = start
     for saved_start, saved_end in ranges:
-        if saved_start <= cursor < saved_end:
-            cursor = saved_end
-            if cursor >= start + count:
-                return True
-    return False
+        if saved_end <= cursor:
+            continue
+        if saved_start >= end:
+            break
+        if saved_start > cursor:
+            uncovered.append((cursor, saved_start - cursor))
+        cursor = max(cursor, min(saved_end, end))
+    if cursor < end:
+        uncovered.append((cursor, end - cursor))
+    return uncovered
+
+
+def glossary_checkpoint_covers(checkpoints: set[str], start: int, count: int) -> bool:
+    """Reuse completed extraction when batch boundaries change across resumes."""
+    return not uncovered_glossary_spans(checkpoints, start, count)

@@ -57,6 +57,14 @@ class ReviewChunkService:
         self._client = client
         self._reviewer = reviewer
 
+    @staticmethod
+    def chunk_budget(config: Config) -> int:
+        """Effective source-token budget per review chunk (3x batch budget, capped at 9600
+        unless the configured batch budget itself is larger).
+        """
+        batch_budget = config.segment.max_tokens_per_batch
+        return max(batch_budget, min(batch_budget * 3, 9600))
+
     def _review_chunk_adaptive(
         self,
         chunk_base: int,
@@ -411,7 +419,7 @@ class ReviewChunkService:
         chapter_list = list(chapters)
         if not chapter_list:
             return []
-        budget = self._config.segment.max_tokens_per_batch * 3
+        budget = self.chunk_budget(self._config)
         all_jobs: list[tuple[int, int | None, int, int, list]] = []
         chapter_chunk_slots: list[list[list[dict] | None]] = []
         remaining_chunks: list[int] = []
@@ -559,7 +567,8 @@ class ReviewChunkService:
         flush_usage: Callable[[], Any] | None = None,
     ) -> list[dict]:
         """Review contiguous chapter blocks in parallel and return chapter-local issue indices.
-        Use blocks around three translation batches to reduce calls and repeated context.
+        Use blocks up to three translation batches (capped at 9,600 source tokens unless the
+        configured batch budget is larger) to reduce calls and repeated context.
         Convert valid block-local indices by the block offset and reject invalid positions.
         Supply the full entity glossary (plus navigation titles matching the chunk, fitted
         to the model context window) to every fresh reviewer request and share the same
